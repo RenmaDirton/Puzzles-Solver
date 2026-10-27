@@ -17,14 +17,6 @@ Target: Android 8.0+ (minSdk 26), arm64-v8a only.
 On your sample screenshot the parser found 125 arrows on a 29x44 lattice and the solver
 cleared all 125 (see `tools/proto_parser.py`, the Python reference the Kotlin code was ported from).
 
-## Build
-
-**Android Studio:** open this folder, let it sync, Run (or Build > Build APK).
-
-**No PC tooling:** push this folder to a GitHub repo. The workflow in
-`.github/workflows/build.yml` builds the debug APK; download it from the run's
-Artifacts (`puzzle-solver-debug-apk`), copy to the phone, install.
-
 ## Use
 
 1. Open the app, tap **1** (allow draw over other apps), **2** (turn on the auto-tap service), **3** (Start, allow screen capture).
