@@ -76,9 +76,12 @@ class MainActivity : Activity() {
         val acc = AutoTapService.instance != null
         info.text = "Overlay permission: ${if (overlay) "OK" else "missing"}\n" +
             "Auto-tap service: ${if (acc) "on" else "off (optional: you can tap by hand using the numbers)"}\n\n" +
-            "How to use: press Start, allow screen capture, open Amaze Go! and a level, " +
-            "then press Scan on the floating panel. Numbers show the tap order " +
-            "(green = can go now). Press Auto to tap them for you."
+            "How to use: press Start, allow screen capture, open Amaze Go! and a level.\n" +
+            "Smart: keeps watching the board and shows a green dot on every arrow that can leave right now. " +
+            "Dots disappear as you tap, no re-scanning needed.\n" +
+            "Auto: scans, taps every free arrow, rescans, repeats. If a tapped arrow does not leave " +
+            "it stops and marks it red instead of moving on.\n" +
+            "Scan: one-off numbered plan for the whole level."
     }
 
     private fun start() {

@@ -2,8 +2,14 @@ package com.puzzlesolver
 
 import android.graphics.Bitmap
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
+
+/** Position of the dot lattice on the screen, in pixels: point (c, r) is at (x0 + c*px, y0 + r*py). */
+class Calibration(val x0: Float, val y0: Float, val px: Float, val py: Float)
 
 /** One arrow (snake). Cells are lattice point ids (row * cols + col). */
 class Arrow(
@@ -18,16 +24,18 @@ class Arrow(
     val tapX: Float,
     val tapY: Float,
 ) {
-    /** Removal round assigned by the solver (0 = free right now). */
+    /** Removal round assigned by the solver (0 = can leave right now). */
     var round: Int = -1
+    val cellSet: Set<Int> by lazy { cells.toHashSet() }
 }
 
 class ParseResult(
     val arrows: List<Arrow>,
+    /** Shapes that could not be read as an arrow. They still block other arrows. */
+    val blockers: List<IntArray>,
     val cols: Int,
     val rows: Int,
-    val pitch: Float,
-    val unparsed: Int,
+    val cal: Calibration,
 )
 
 /**
@@ -36,6 +44,10 @@ class ParseResult(
  * The board is a lattice of points. Every arrow is a polyline along lattice lines, and
  * different arrows never share a lattice point, so each connected component of ink edges
  * is one arrow. The head is the endpoint with arrowhead wings (extra ink on both sides).
+ *
+ * "Ink" is anything clearly different from the background, so brown, gold (highlighted)
+ * and red (blocked) arrows are all seen, while the faint lattice dots left behind on
+ * cleared areas are ignored.
  */
 object BoardParser {
 
@@ -44,14 +56,16 @@ object BoardParser {
     private const val LEFT = 4
     private const val UP = 8
 
-    fun parse(bmp: Bitmap): ParseResult? {
+    private const val INK_THRESHOLD = 165
+
+    fun parse(bmp: Bitmap, cached: Calibration?): ParseResult? {
         val w = bmp.width
         val h = bmp.height
         val pix = IntArray(w * h)
         bmp.getPixels(pix, 0, w, 0, 0, w, h)
 
-        // ---- 1. ink mask: anything strongly different from the background colour ----
-        val bg = pix[(h * 0.5f).toInt() * w + 8]
+        // ---- 1. ink mask: anything clearly different from the background colour ----
+        val bg = pix[(h / 2) * w + 8]
         val bgR = (bg shr 16) and 0xFF
         val bgG = (bg shr 8) and 0xFF
         val bgB = bg and 0xFF
@@ -61,12 +75,124 @@ object BoardParser {
             val d = abs(((p shr 16) and 0xFF) - bgR) +
                 abs(((p shr 8) and 0xFF) - bgG) +
                 abs((p and 0xFF) - bgB)
-            mask[i] = d > 250
+            mask[i] = d > INK_THRESHOLD
         }
 
         // Board lives in the middle band of the screen (header and bottom buttons excluded).
-        val y0 = (h * 0.18f).toInt()
+        val y0 = (h * 0.20f).toInt()
         val y1 = (h * 0.86f).toInt()
+
+        // Reuse the previous lattice if it still explains the ink (cheap and stable when
+        // the board is mostly cleared); otherwise fit a new one.
+        var cal: Calibration? = cached
+        if (cal != null && explained(mask, w, h, y0, y1, cal) < 0.90f) cal = null
+        val usedCal = cal ?: calibrate(mask, w, h, y0, y1) ?: return null
+        return parseWith(mask, w, h, y0, y1, usedCal)
+    }
+
+    // ------------------------------------------------------------------ calibration
+
+    private fun explained(mask: BooleanArray, w: Int, h: Int, y0: Int, y1: Int, cal: Calibration): Float {
+        val nearX = BooleanArray(w) { x ->
+            val t = (x - cal.x0) / cal.px
+            abs(t - t.roundToInt()) * cal.px <= 3.2f
+        }
+        val nearY = BooleanArray(h) { y ->
+            val t = (y - cal.y0) / cal.py
+            abs(t - t.roundToInt()) * cal.py <= 3.2f
+        }
+        var total = 0
+        var ok = 0
+        for (y in y0 until y1) {
+            val base = y * w
+            val ny = nearY[y]
+            for (x in 0 until w) {
+                if (mask[base + x]) {
+                    total++
+                    if (ny || nearX[x]) ok++
+                }
+            }
+        }
+        return if (total == 0) 1f else ok.toFloat() / total
+    }
+
+    private fun scoreAxis(proj: FloatArray, p: Float, o: Float): Float {
+        val n = proj.size
+        var s = 0f
+        var x = o
+        while (x < n - 1) {
+            val i = x.roundToInt().coerceIn(1, n - 2)
+            s += max(proj[i - 1], max(proj[i], proj[i + 1]))
+            x += p
+        }
+        return s
+    }
+
+    private fun bestOffset(proj: FloatArray, p: Float): Pair<Float, Float> {
+        var best = -1f
+        var bo = 0f
+        var o = 0f
+        while (o < p) {
+            val s = scoreAxis(proj, p, o)
+            if (s > best) {
+                best = s
+                bo = o
+            }
+            o += 0.25f
+        }
+        return best to bo
+    }
+
+    /** Least-squares fit of the line centres: position = o + k * p. Returns (p, o). */
+    private fun refineAxis(proj: FloatArray, p0: Float, o0: Float): Pair<Float, Float>? {
+        val n = proj.size
+        var cnt = 0
+        var sk = 0.0
+        var sc = 0.0
+        var skk = 0.0
+        var skc = 0.0
+        var k = 0
+        while (o0 + k * p0 < n - 6) {
+            val xc = o0 + k * p0
+            if (xc >= 6f) {
+                val lo = (xc - 5f).toInt()
+                val hi = min((xc + 5f).toInt() + 1, n)
+                var mx = 0f
+                var mn = Float.MAX_VALUE
+                for (i in lo until hi) {
+                    mx = max(mx, proj[i])
+                    mn = min(mn, proj[i])
+                }
+                if (mx > p0 * 1.5f) {
+                    var sw = 0.0
+                    var sx = 0.0
+                    for (i in lo until hi) {
+                        val v = (proj[i] - mn).toDouble()
+                        sw += v
+                        sx += v * i
+                    }
+                    if (sw > 0.0) {
+                        val c = sx / sw
+                        cnt++
+                        sk += k.toDouble()
+                        sc += c
+                        skk += k.toDouble() * k
+                        skc += k * c
+                    }
+                }
+            }
+            k++
+        }
+        if (cnt < 4) return null
+        val den = cnt * skk - sk * sk
+        if (abs(den) < 1e-9) return null
+        val p = (cnt * skc - sk * sc) / den
+        val o = (sc - p * sk) / cnt
+        if (p < p0 * 0.9 || p > p0 * 1.1) return null
+        return p.toFloat() to o.toFloat()
+    }
+
+    private fun calibrate(mask: BooleanArray, w: Int, h: Int, y0: Int, y1: Int): Calibration? {
         val col = FloatArray(w)
         val row = FloatArray(h)
         for (y in y0 until y1) {
@@ -79,92 +205,59 @@ object BoardParser {
             }
         }
 
-        // ---- 2. calibrate the lattice (pitch and offsets) ----
-        fun scoreAxis(proj: FloatArray, p: Float, o: Float): Float {
-            val n = proj.size
-            var s = 0f
-            var x = o
-            while (x < n - 1) {
-                val i = x.roundToInt().coerceIn(1, n - 2)
-                s += max(proj[i - 1], max(proj[i], proj[i + 1]))
-                x += p
-            }
-            return s
-        }
-
-        fun bestOffset(proj: FloatArray, p: Float): Pair<Float, Float> {
-            var best = -1f
-            var bo = 0f
-            var o = 0f
-            while (o < p) {
-                val s = scoreAxis(proj, p, o)
-                if (s > best) {
-                    best = s
-                    bo = o
-                }
-                o += 0.25f
-            }
-            return best to bo
-        }
-
         // coarse pass: largest pitch that still explains (almost) all the ink
-        val coarse = ArrayList<Pair<Float, Float>>() // (pitch, score)
-        for (k in 0..420) {
-            val p = 18f + k * 0.1f
-            coarse.add(p to (bestOffset(col, p).first + bestOffset(row, p).first))
+        val pitches = FloatArray(421) { 18f + it * 0.1f }
+        val scores = FloatArray(421)
+        var maxScore = 0f
+        for (i in pitches.indices) {
+            scores[i] = bestOffset(col, pitches[i]).first + bestOffset(row, pitches[i]).first
+            if (scores[i] > maxScore) maxScore = scores[i]
         }
-        val maxScore = coarse.maxOf { it.second }
         if (maxScore <= 0f) return null
-        val pc = coarse.filter { it.second >= 0.93f * maxScore }.maxOf { it.first }
+        var pc = pitches[0]
+        for (i in pitches.indices) {
+            if (scores[i] >= 0.93f * maxScore && pitches[i] > pc) pc = pitches[i]
+        }
 
         // fine pass
-        var bestTot = -1f
+        var bestTotal = -1f
         var pitch = pc
-        var x0 = 0f
-        var yy0 = 0f
+        var ox = 0f
+        var oy = 0f
         for (k in -30..30) {
             val p = pc + k * 0.02f
             val sx = bestOffset(col, p)
             val sy = bestOffset(row, p)
-            val tot = sx.first + sy.first
-            if (tot > bestTot) {
-                bestTot = tot
+            if (sx.first + sy.first > bestTotal) {
+                bestTotal = sx.first + sy.first
                 pitch = p
-                x0 = sx.second
-                yy0 = sy.second
+                ox = sx.second
+                oy = sy.second
             }
         }
 
-        val thr = pitch * 1.2f
-        var kx0 = Int.MAX_VALUE
-        var kx1 = Int.MIN_VALUE
-        var k = 0
-        while (x0 + k * pitch < w - 1) {
-            val xi = (x0 + k * pitch).roundToInt().coerceIn(1, w - 2)
-            if (max(col[xi - 1], max(col[xi], col[xi + 1])) > thr) {
-                if (k < kx0) kx0 = k
-                if (k > kx1) kx1 = k
-            }
-            k++
-        }
-        var ky0 = Int.MAX_VALUE
-        var ky1 = Int.MIN_VALUE
-        k = 0
-        while (yy0 + k * pitch < h - 1) {
-            val yi = (yy0 + k * pitch).roundToInt().coerceIn(1, h - 2)
-            if (max(row[yi - 1], max(row[yi], row[yi + 1])) > thr) {
-                if (k < ky0) ky0 = k
-                if (k > ky1) ky1 = k
-            }
-            k++
-        }
-        if (kx0 > kx1 || ky0 > ky1) return null
-        val nc = kx1 - kx0 + 1
-        val nr = ky1 - ky0 + 1
-        if (nc < 3 || nr < 3) return null
+        val rx = refineAxis(col, pitch, ox)
+        val ry = refineAxis(row, pitch, oy)
+        return Calibration(
+            x0 = rx?.second ?: ox,
+            y0 = ry?.second ?: oy,
+            px = rx?.first ?: pitch,
+            py = ry?.first ?: pitch,
+        )
+    }
 
-        fun px(c: Int) = x0 + (kx0 + c) * pitch
-        fun py(r: Int) = yy0 + (ky0 + r) * pitch
+    // ------------------------------------------------------------------ arrows
+
+    private fun parseWith(mask: BooleanArray, w: Int, h: Int, y0: Int, y1: Int, cal: Calibration): ParseResult {
+        val cmin = ceil((0.04f * w - cal.x0) / cal.px).toInt()
+        val cmax = floor((0.96f * w - cal.x0) / cal.px).toInt()
+        val rmin = ceil((y0 - cal.y0) / cal.py).toInt()
+        val rmax = floor((y1 - cal.y0) / cal.py).toInt()
+        val nc = cmax - cmin + 1
+        val nr = rmax - rmin + 1
+
+        fun px(c: Int) = cal.x0 + (cmin + c) * cal.px
+        fun py(r: Int) = cal.y0 + (rmin + r) * cal.py
 
         fun inkNear(x: Int, y: Int): Boolean {
             for (dy in -1..1) {
@@ -186,7 +279,7 @@ object BoardParser {
             return hit
         }
 
-        // ---- 3. edges between neighbouring lattice points ----
+        // ---- edges between neighbouring lattice points ----
         val conn = ByteArray(nc * nr)
         for (r in 0 until nr) {
             for (c in 0 until nc) {
@@ -220,20 +313,22 @@ object BoardParser {
             val perpX = -dy
             val perpY = dx
             var cnt = 0
-            for (back in intArrayOf(4, 8, 12)) {
-                for (side in intArrayOf(-9, -7, 7, 9)) {
+            var back = 3
+            while (back < 22) {
+                for (side in intArrayOf(-10, -8, -6, 6, 8, 10)) {
                     val sx = (x - dx * back + perpX * side).roundToInt()
                     val sy = (y - dy * back + perpY * side).roundToInt()
                     if (sx in 0 until w && sy in 0 until h && mask[sy * w + sx]) cnt++
                 }
+                back += 3
             }
             return cnt
         }
 
-        // ---- 4. components => arrows ----
+        // ---- components => arrows (or blockers when unreadable) ----
         val seen = BooleanArray(nc * nr)
         val arrows = ArrayList<Arrow>()
-        var unparsed = 0
+        val blockers = ArrayList<IntArray>()
         val stack = IntArray(nc * nr)
         for (start in 0 until nc * nr) {
             if (seen[start] || conn[start].toInt() == 0) continue
@@ -254,7 +349,7 @@ object BoardParser {
             val ends = comp.filter { Integer.bitCount(conn[it].toInt()) == 1 }
             val branched = comp.any { Integer.bitCount(conn[it].toInt()) > 2 }
             if (comp.size < 2 || ends.size != 2 || branched) {
-                unparsed++
+                blockers.add(comp.toIntArray())
                 continue
             }
             val scores = IntArray(2)
@@ -267,7 +362,7 @@ object BoardParser {
                 scores[i] = headScore(e, dirs[i][0], dirs[i][1])
             }
             if (scores[0] == scores[1]) {
-                unparsed++
+                blockers.add(comp.toIntArray())
                 continue
             }
             val hi = if (scores[0] > scores[1]) 0 else 1
@@ -286,6 +381,6 @@ object BoardParser {
                 ),
             )
         }
-        return ParseResult(arrows, nc, nr, pitch, unparsed)
+        return ParseResult(arrows, blockers, nc, nr, cal)
     }
 }
