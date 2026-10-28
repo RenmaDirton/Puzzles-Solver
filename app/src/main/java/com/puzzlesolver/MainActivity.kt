@@ -34,7 +34,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         col.addView(TextView(this).apply {
-            text = "Puzzle solver 0.1"
+            text = "Puzzle solver 0.2"
             textSize = 26f
             setTextColor(Color.BLACK)
         })
@@ -78,8 +78,9 @@ class MainActivity : Activity() {
             "Auto-tap service: ${if (acc) "on" else "off (optional: you can tap by hand using the numbers)"}\n\n" +
             "How to use: press Start, allow screen capture, open Amaze Go! and a level.\n" +
             "Smart: keeps watching the board and shows a green dot on every arrow that can leave right now. " +
-            "Dots disappear as you tap, no re-scanning needed.\n" +
-            "Auto: scans, taps every free arrow, rescans, repeats. If a tapped arrow does not leave " +
+            "Dots disappear while arrows are sliding and come back when the screen is still.\n" +
+            "Auto: waits for a still screen, scans twice, taps arrows whose exit paths do not cross, " +
+            "waits for them to leave, repeats. If a tapped arrow hits something or will not move " +
             "it stops and marks it red instead of moving on.\n" +
             "Scan: one-off numbered plan for the whole level."
     }

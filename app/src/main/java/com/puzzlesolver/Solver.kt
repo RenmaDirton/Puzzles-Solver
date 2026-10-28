@@ -8,13 +8,25 @@ class SolveResult(
     val rounds: Int,
 )
 
+/** Lattice cells in front of the arrow's head, up to the edge of the lattice. */
+fun rayCells(a: Arrow, nc: Int, nr: Int): IntArray {
+    val out = ArrayList<Int>()
+    var c = a.headC + a.dirC
+    var r = a.headR + a.dirR
+    while (c in 0 until nc && r in 0 until nr) {
+        out.add(r * nc + c)
+        c += a.dirC
+        r += a.dirR
+    }
+    return out.toIntArray()
+}
+
 /**
  * An arrow can leave when the straight line from its head to the board edge crosses no
  * other arrow that is still on the board. Removing an arrow never blocks another one, so
  * repeatedly removing every free arrow solves any solvable level.
  *
- * Arrows freed in the same round do not depend on each other, so they can be tapped
- * back to back. Arrow.round == 0 means "can leave right now".
+ * Arrow.round == 0 means "can leave right now".
  *
  * Shapes the parser could not read (ParseResult.blockers) are treated as permanent
  * obstacles, so a misread can only make the solver more careful, never reckless.
@@ -30,17 +42,13 @@ object Solver {
 
         val alive = BooleanArray(arrows.size) { true }
         var remaining = arrows.size
+        val rays = Array(arrows.size) { rayCells(arrows[it], nc, nr) }
 
         fun isFree(i: Int): Boolean {
-            val a = arrows[i]
-            var c = a.headC + a.dirC
-            var r = a.headR + a.dirR
-            while (c in 0 until nc && r in 0 until nr) {
-                val o = owner[r * nc + c]
+            for (id in rays[i]) {
+                val o = owner[id]
                 if (o == -2) return false
                 if (o >= 0 && o != i && alive[o]) return false
-                c += a.dirC
-                r += a.dirR
             }
             return true
         }
@@ -59,5 +67,34 @@ object Solver {
             round++
         }
         return SolveResult(order, remaining, round)
+    }
+}
+
+/**
+ * Chooses which of the currently free arrows may be tapped together.
+ *
+ * Two free arrows can still collide while sliding: if their exit paths cross, the second
+ * one runs into the body of the first while it is still passing through. So a batch only
+ * contains arrows whose exit paths (and bodies) do not touch each other. The rest wait
+ * for the next round, after the screen has settled.
+ */
+object Planner {
+    fun safeBatch(res: ParseResult): List<Arrow> {
+        val nc = res.cols
+        val nr = res.rows
+        val usedRay = BooleanArray(nc * nr)
+        val usedBody = BooleanArray(nc * nr)
+        val out = ArrayList<Arrow>()
+        val cands = res.arrows.filter { it.round == 0 }
+            .map { it to rayCells(it, nc, nr) }
+            .sortedBy { it.second.size }
+        for ((a, ray) in cands) {
+            if (ray.any { usedRay[it] || usedBody[it] }) continue
+            if (a.cells.any { usedRay[it] }) continue
+            for (id in ray) usedRay[id] = true
+            for (id in a.cells) usedBody[id] = true
+            out.add(a)
+        }
+        return out
     }
 }

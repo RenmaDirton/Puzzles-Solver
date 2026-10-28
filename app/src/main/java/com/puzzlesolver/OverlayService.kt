@@ -31,6 +31,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 
 class OverlayService : Service() {
 
@@ -43,19 +44,22 @@ class OverlayService : Service() {
         /** Gap between two taps inside one batch. */
         private const val TAP_GAP_MS = 90L
 
-        /** How long Auto waits for a batch to slide off before it rescans (Speed 1..3). */
-        private val SETTLE_MS = longArrayOf(500L, 800L, 1200L)
+        /** Gold pixels on the board mean some arrow is still sliding off. */
+        private const val GOLD_MOVING = 120
 
-        /** A tapped arrow that is still on the board after this long counts as a failure. */
-        private const val FAIL_AFTER_MS = 3000L
+        /** Red pixels mean an arrow hit another one. */
+        private const val RED_HIT = 150
+
+        private const val POLL_MS = 120L
+        private const val SETTLE_MAX_MS = 8000L
+        private const val AFTER_TAP_MS = 400L
+        private const val MAX_ATTEMPTS = 3
     }
 
-    private class Pending(val cells: Set<Int>, val time: Long)
+    private class Scan(val res: ParseResult?, val solved: SolveResult?, val gold: Int, val red: Int)
 
     private lateinit var wm: WindowManager
     private val main = Handler(Looper.getMainLooper())
-    private val auto = Handler(Looper.getMainLooper())
-    private val smart = Handler(Looper.getMainLooper())
     private val lock = Any()
     private val frameSeq = AtomicInteger(0)
 
@@ -70,18 +74,22 @@ class OverlayService : Service() {
     private lateinit var status: TextView
     private lateinit var smartBtn: Button
     private lateinit var autoBtn: Button
-    private lateinit var speedBtn: Button
 
     private var cal: Calibration? = null
-    private var scanBusy = false
+    private var captureBusy = false
+
+    /** Bumped whenever a mode starts or stops, so late callbacks from an old run can be ignored. */
+    private var session = 0
     private var smartOn = false
     private var autoOn = false
+    private var smartBusy = false
     private var followUps = 0
-    private var speedIdx = 1
-    private val pending = ArrayList<Pending>()
-    private var lastCal: Calibration? = null
+    private var redSeen = false
+    private var unsure = 0
+    private val tapped = HashSet<String>()
+    private val attempts = HashMap<String, Int>()
 
-    private val tick = Runnable { smartScan() }
+    private val smartTick = Runnable { smartStep() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -181,59 +189,116 @@ class OverlayService : Service() {
         }
     }
 
-    /**
-     * Captures a clean frame (our own markers hidden), reads the board and solves it.
-     * The callback runs on the main thread. Only one scan runs at a time.
-     */
-    private fun requestScan(fullRecalibrate: Boolean, cb: (ParseResult?, SolveResult?) -> Unit) {
-        if (scanBusy) {
-            main.postDelayed({ requestScan(fullRecalibrate, cb) }, 150L)
+    /** Latest frame as raw pixels (converted off the main thread). Markers are left as they are. */
+    private fun grabFrame(cb: (BoardParser.Frame?) -> Unit) {
+        val bmp = grabBitmap()
+        if (bmp == null) {
+            cb(null)
             return
         }
-        scanBusy = true
-        if (fullRecalibrate) cal = null
+        Thread {
+            val f = try {
+                BoardParser.frameOf(bmp)
+            } catch (e: Exception) {
+                null
+            }
+            main.post { cb(f) }
+        }.start()
+    }
 
+    /** Like grabFrame, but hides our own markers first so they cannot end up in the picture. */
+    private fun captureClean(cb: (BoardParser.Frame?) -> Unit) {
+        if (captureBusy) {
+            main.postDelayed({ captureClean(cb) }, 100L)
+            return
+        }
+        captureBusy = true
         val mv = markerView
-        val hadMarkers = mv != null && mv.visibility == View.VISIBLE && mv.items.isNotEmpty()
+        val hide = mv != null && mv.visibility == View.VISIBLE && mv.items.isNotEmpty()
         val seq0 = frameSeq.get()
-        if (hadMarkers) mv!!.visibility = View.INVISIBLE
         val started = SystemClock.uptimeMillis()
+        if (hide) mv!!.visibility = View.INVISIBLE
 
         fun grab() {
             val bmp = grabBitmap()
-            markerView?.visibility = View.VISIBLE
+            if (hide) markerView?.visibility = View.VISIBLE
             if (bmp == null) {
-                scanBusy = false
-                cb(null, null)
+                captureBusy = false
+                cb(null)
                 return
             }
-            val calUsed = cal
             Thread {
-                val parsed = try {
-                    BoardParser.parse(bmp, calUsed)
+                val f = try {
+                    BoardParser.frameOf(bmp)
                 } catch (e: Exception) {
                     null
                 }
-                val solved = parsed?.let { Solver.solve(it) }
                 main.post {
-                    scanBusy = false
-                    if (parsed != null) cal = parsed.cal
-                    cb(parsed, solved)
+                    captureBusy = false
+                    cb(f)
                 }
             }.start()
         }
 
         fun waitFrame() {
-            val fresh = !hadMarkers ||
-                frameSeq.get() != seq0 ||
-                SystemClock.uptimeMillis() - started > 500L
-            if (!fresh) {
-                main.postDelayed({ waitFrame() }, 20L)
-            } else {
-                main.postDelayed({ grab() }, if (hadMarkers) 60L else 0L)
-            }
+            val fresh = !hide || frameSeq.get() != seq0 || SystemClock.uptimeMillis() - started > 500L
+            if (fresh) main.postDelayed({ grab() }, if (hide) 60L else 0L) else main.postDelayed({ waitFrame() }, 20L)
         }
         waitFrame()
+    }
+
+    /** Clean capture, motion check and (when nothing is sliding) parse + solve. */
+    private fun scanBoard(cb: (Scan) -> Unit) {
+        captureClean { f ->
+            if (f == null) {
+                cb(Scan(null, null, 0, 0))
+                return@captureClean
+            }
+            val calUsed = cal
+            Thread {
+                val m = BoardParser.motion(f)
+                var res: ParseResult? = null
+                var solved: SolveResult? = null
+                if (m[0] < GOLD_MOVING) {
+                    res = try {
+                        BoardParser.parse(f, calUsed)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    solved = res?.let { Solver.solve(it) }
+                }
+                main.post {
+                    if (res != null) cal = res.cal
+                    cb(Scan(res, solved, m[0], m[1]))
+                }
+            }.start()
+        }
+    }
+
+    /**
+     * Waits until no arrow is sliding any more (no gold on the board for two checks in a row).
+     * Gives up after SETTLE_MAX_MS. Remembers whether red (a collision) showed up meanwhile.
+     */
+    private fun waitSettled(id: Int, cb: () -> Unit) {
+        val start = SystemClock.uptimeMillis()
+        var calm = 0
+        fun poll() {
+            if (id != session) return
+            grabFrame { f ->
+                if (id != session) return@grabFrame
+                if (f != null) {
+                    val m = BoardParser.motion(f)
+                    if (m[1] >= RED_HIT) redSeen = true
+                    if (m[0] < GOLD_MOVING) calm++ else calm = 0
+                }
+                if (calm >= 2 || SystemClock.uptimeMillis() - start > SETTLE_MAX_MS) {
+                    cb()
+                } else {
+                    main.postDelayed({ poll() }, POLL_MS)
+                }
+            }
+        }
+        poll()
     }
 
     // ------------------------------------------------------------------ windows
@@ -301,16 +366,15 @@ class OverlayService : Service() {
             isAllCaps = false
             minWidth = 0
             minimumWidth = 0
-            setPadding(dp(8), 0, dp(8), 0)
+            setPadding(dp(10), 0, dp(10), 0)
             setOnClickListener { onClick() }
         }
 
         val scan = btn("Scan") { scanFull() }
         smartBtn = btn("Smart") { toggleSmart() }
         autoBtn = btn("Auto") { toggleAuto() }
-        speedBtn = btn("Speed 2") { cycleSpeed() }
         val close = btn("X") { stopSelf() }
-        for (b in listOf(scan, smartBtn, autoBtn, speedBtn, close)) row.addView(b)
+        for (b in listOf(scan, smartBtn, autoBtn, close)) row.addView(b)
 
         p.addView(status)
         p.addView(row)
@@ -329,102 +393,114 @@ class OverlayService : Service() {
         panel = p
     }
 
-    // ------------------------------------------------------------------ display helpers
+    // ------------------------------------------------------------------ helpers
 
-    private fun showLive(res: ParseResult, failed: Arrow? = null) {
-        val list = ArrayList<Marker>()
-        for (a in res.arrows) if (a.round == 0) list.add(Marker(0, a.headX, a.headY, 0))
-        if (failed != null) list.add(Marker(0, failed.headX, failed.headY, -2))
-        markerView?.items = list
+    private fun key(a: Arrow): String =
+        "${(a.headX / 3f).roundToInt()},${(a.headY / 3f).roundToInt()},${a.dirC},${a.dirR}"
+
+    private fun clearMarkers() {
+        markerView?.items = emptyList()
     }
 
-    private fun liveStatus(res: ParseResult, solved: SolveResult): String {
-        val now = res.arrows.count { it.round == 0 }
-        val unread = if (res.blockers.isNotEmpty()) " | ${res.blockers.size} unread" else ""
-        return when {
-            res.arrows.isEmpty() -> "No arrows left$unread"
-            now == 0 -> "None can move, ${solved.stuck} stuck$unread"
-            else -> "$now can move now | ${res.arrows.size} left$unread"
-        }
-    }
+    private fun unreadText(res: ParseResult) =
+        if (res.blockers.isNotEmpty()) " | ${res.blockers.size} unread" else ""
 
     // ------------------------------------------------------------------ Scan (numbered plan)
 
     private fun scanFull() {
         stopAuto(null)
         stopSmart()
+        val id = ++session
+        cal = null
+        clearMarkers()
         status.text = "Scanning..."
-        requestScan(true) { res, solved ->
-            if (res == null || solved == null || res.arrows.isEmpty()) {
-                markerView?.items = emptyList()
-                status.text = "Could not find a board. Open a level and try again."
-                return@requestScan
+        waitSettled(id) {
+            scanBoard { s ->
+                if (id != session) return@scanBoard
+                val res = s.res
+                val solved = s.solved
+                if (res == null || solved == null || res.arrows.isEmpty()) {
+                    status.text = if (s.gold >= GOLD_MOVING) "Arrows are still moving, try again" else "Could not find a board. Open a level and try again."
+                    return@scanBoard
+                }
+                markerView?.items = solved.order.mapIndexed { i, a -> Marker(i + 1, a.headX, a.headY, a.round) }
+                status.text = "${res.arrows.size} arrows, ${solved.rounds} rounds${unreadText(res)}"
             }
-            markerView?.items = solved.order.mapIndexed { i, a -> Marker(i + 1, a.headX, a.headY, a.round) }
-            val unread = if (res.blockers.isNotEmpty()) " | ${res.blockers.size} unread" else ""
-            status.text = "${res.arrows.size} arrows, ${solved.rounds} rounds$unread"
         }
     }
 
     // ------------------------------------------------------------------ Smart scan
 
-    private fun schedule(ms: Long) {
-        smart.removeCallbacks(tick)
-        smart.postDelayed(tick, ms)
-    }
-
     private fun toggleSmart() {
         if (smartOn) {
             stopSmart()
-            markerView?.items = emptyList()
+            clearMarkers()
             status.text = "Smart off"
         } else {
             stopAuto(null)
+            ++session
             smartOn = true
             smartBtn.text = "Smart ON"
+            clearMarkers()
             status.text = "Smart scanning..."
-            schedule(0L)
+            scheduleSmart(0L)
         }
     }
 
     private fun stopSmart() {
         smartOn = false
-        smart.removeCallbacksAndMessages(null)
+        smartBusy = false
+        main.removeCallbacks(smartTick)
         if (::smartBtn.isInitialized) smartBtn.text = "Smart"
+    }
+
+    private fun scheduleSmart(ms: Long) {
+        main.removeCallbacks(smartTick)
+        main.postDelayed(smartTick, ms)
     }
 
     private fun onUserTouch() {
         if (!smartOn || autoOn) return
-        followUps = 1
-        schedule(650L)
+        followUps = 3
+        scheduleSmart(500L)
     }
 
-    private fun smartScan() {
-        if (!smartOn || autoOn) return
-        requestScan(false) { res, solved ->
-            if (!smartOn) return@requestScan
+    private fun smartStep() {
+        if (!smartOn || smartBusy) return
+        smartBusy = true
+        val id = session
+        scanBoard { s ->
+            smartBusy = false
+            if (id != session || !smartOn) return@scanBoard
+            val res = s.res
+            val solved = s.solved
+            var next = 3000L
             if (res == null || solved == null) {
-                markerView?.items = emptyList()
-                status.text = "No board found"
+                clearMarkers()
+                if (s.gold >= GOLD_MOVING) {
+                    status.text = "Arrows moving..."
+                    next = 350L
+                } else {
+                    status.text = "No board found"
+                }
             } else {
-                showLive(res)
-                status.text = liveStatus(res, solved)
+                markerView?.items = res.arrows.filter { it.round == 0 }.map { Marker(0, it.headX, it.headY, 0) }
+                val now = res.arrows.count { it.round == 0 }
+                status.text = when {
+                    res.arrows.isEmpty() -> "No arrows left${unreadText(res)}"
+                    now == 0 -> "None can move, ${solved.stuck} stuck${unreadText(res)}"
+                    else -> "$now can move now | ${res.arrows.size} left${unreadText(res)}"
+                }
+                if (followUps > 0) {
+                    followUps--
+                    next = 900L
+                }
             }
-            if (followUps > 0) {
-                followUps--
-                schedule(900L)
-            } else {
-                schedule(3000L)
-            }
+            scheduleSmart(next)
         }
     }
 
     // ------------------------------------------------------------------ Auto (closed loop)
-
-    private fun cycleSpeed() {
-        speedIdx = (speedIdx + 1) % SETTLE_MS.size
-        speedBtn.text = "Speed ${speedIdx + 1}"
-    }
 
     private fun toggleAuto() {
         if (autoOn) stopAuto("Stopped") else startAuto()
@@ -436,86 +512,139 @@ class OverlayService : Service() {
             return
         }
         stopSmart()
+        val id = ++session
         autoOn = true
         autoBtn.text = "Stop"
-        pending.clear()
-        lastCal = null
-        status.text = "Auto: scanning..."
-        autoStep()
+        tapped.clear()
+        attempts.clear()
+        unsure = 0
+        redSeen = false
+        clearMarkers()
+        status.text = "Auto: waiting for a still screen..."
+        waitSettled(id) {
+            redSeen = false // a red arrow that was already there before we started is not our doing
+            autoStep(id)
+        }
     }
 
     private fun stopAuto(msg: String?) {
-        auto.removeCallbacksAndMessages(null)
+        if (autoOn) ++session
         autoOn = false
+        tapped.clear()
         if (::autoBtn.isInitialized) autoBtn.text = "Auto"
         if (msg != null && ::status.isInitialized) status.text = msg
     }
 
+    private fun autoFail(msg: String, at: Arrow? = null) {
+        stopAuto(msg)
+        clearMarkers()
+        if (at != null) markerView?.items = listOf(Marker(0, at.headX, at.headY, -2))
+    }
+
     /**
-     * One round of the loop: scan, tap every arrow that can leave right now, wait, repeat.
-     * It never taps an arrow that the latest scan says is blocked, and it stops (instead
-     * of moving on to the next arrow) if an arrow it tapped does not leave.
+     * One round of the loop. The screen is already still when this runs.
+     *   1. scan; if an arrow we tapped is still there, stop (red = it hit something)
+     *   2. scan again 160 ms later and only keep arrows that both scans agree are free
+     *   3. tap a batch whose exit paths do not touch each other
+     *   4. wait for the sliding to finish, then repeat
+     * It never moves on to "the next arrow" after a problem: it stops and shows what went wrong.
      */
-    private fun autoStep() {
-        if (!autoOn) return
-        requestScan(false) { res, solved ->
-            if (!autoOn) return@requestScan
-            if (res == null || solved == null) {
-                stopAuto("Auto stopped: cannot read the board")
-                return@requestScan
-            }
-            if (lastCal !== res.cal) pending.clear() // lattice changed, old ids are meaningless
-            lastCal = res.cal
-
-            val now = SystemClock.uptimeMillis()
-            var failed: Arrow? = null
-            val still = ArrayList<Pending>()
-            for (p in pending) {
-                val a = res.arrows.firstOrNull { ar -> ar.cells.any { it in p.cells } } ?: continue
-                if (now - p.time > FAIL_AFTER_MS) failed = a else still.add(p)
-            }
-            pending.clear()
-            pending.addAll(still)
-
-            showLive(res, failed)
-            if (failed != null) {
-                stopAuto("Auto stopped: a tapped arrow (red) did not leave")
-                return@requestScan
-            }
-            if (res.arrows.isEmpty()) {
-                stopAuto(if (res.blockers.isEmpty()) "Board clear" else "Done, ${res.blockers.size} unread shapes left")
-                return@requestScan
-            }
-
-            val free = res.arrows.filter { a ->
-                a.round == 0 && pending.none { p -> a.cells.any { it in p.cells } }
-            }
-            if (free.isEmpty()) {
-                if (pending.isNotEmpty()) {
-                    auto.postDelayed({ autoStep() }, 400L)
+    private fun autoStep(id: Int) {
+        if (id != session || !autoOn) return
+        scanBoard { s1 ->
+            if (id != session || !autoOn) return@scanBoard
+            val res1 = s1.res
+            if (res1 == null) {
+                if (s1.gold >= GOLD_MOVING) {
+                    waitSettled(id) { autoStep(id) }
                 } else {
-                    stopAuto("Auto stopped: ${res.arrows.size} arrows cannot move (${res.blockers.size} unread)")
+                    autoFail("Auto stopped: cannot read the board")
                 }
-                return@requestScan
+                return@scanBoard
+            }
+            if (res1.arrows.isEmpty()) {
+                stopAuto(if (res1.blockers.isEmpty()) "Board clear" else "Done, ${res1.blockers.size} unread shapes left")
+                clearMarkers()
+                return@scanBoard
+            }
+            if (res1.blockers.size > res1.arrows.size / 2 + 3) {
+                autoFail("Auto stopped: board unclear (${res1.blockers.size} unread shapes)")
+                return@scanBoard
             }
 
-            status.text = "Auto: tapping ${free.size} | ${res.arrows.size} left"
-            free.forEachIndexed { i, a ->
-                auto.postDelayed({
-                    if (!autoOn) return@postDelayed
-                    AutoTapService.instance?.tap(a.tapX, a.tapY)
-                    pending.add(Pending(a.cellSet, SystemClock.uptimeMillis()))
-                }, i * TAP_GAP_MS)
+            // did the arrows we tapped last time actually leave?
+            val still = res1.arrows.filter { key(it) in tapped }
+            if (still.isNotEmpty()) {
+                if (redSeen || s1.red >= RED_HIT) {
+                    autoFail("Auto stopped: a tapped arrow hit something (red)", still[0])
+                    return@scanBoard
+                }
+                val worst = still.maxByOrNull { attempts[key(it)] ?: 0 }!!
+                if ((attempts[key(worst)] ?: 0) >= MAX_ATTEMPTS) {
+                    autoFail("Auto stopped: an arrow will not move", worst)
+                    return@scanBoard
+                }
             }
-            auto.postDelayed({ autoStep() }, free.size * TAP_GAP_MS + SETTLE_MS[speedIdx])
+            tapped.clear()
+            redSeen = false
+
+            val free1 = res1.arrows.filter { it.round == 0 }.map { key(it) }.toHashSet()
+            if (free1.isEmpty()) {
+                autoFail("Auto stopped: ${res1.arrows.size} arrows cannot move${unreadText(res1)}")
+                return@scanBoard
+            }
+
+            main.postDelayed({
+                if (id != session || !autoOn) return@postDelayed
+                scanBoard { s2 ->
+                    if (id != session || !autoOn) return@scanBoard
+                    val res2 = s2.res
+                    if (res2 == null) {
+                        // something moved between the two scans: start over from a still screen
+                        waitSettled(id) { autoStep(id) }
+                        return@scanBoard
+                    }
+                    val batch = Planner.safeBatch(res2).filter { key(it) in free1 }
+                    if (batch.isEmpty()) {
+                        unsure++
+                        if (unsure > 3) {
+                            autoFail("Auto stopped: scans keep disagreeing")
+                        } else {
+                            main.postDelayed({ autoStep(id) }, 300L)
+                        }
+                        return@scanBoard
+                    }
+                    unsure = 0
+                    status.text = "Auto: tapping ${batch.size} | ${res2.arrows.size} left"
+                    val svc = AutoTapService.instance
+                    if (svc == null) {
+                        autoFail("Auto stopped: accessibility service is off")
+                        return@scanBoard
+                    }
+                    batch.forEachIndexed { i, a ->
+                        main.postDelayed({
+                            if (id != session || !autoOn) return@postDelayed
+                            AutoTapService.instance?.tap(a.tapX, a.tapY)
+                        }, i * TAP_GAP_MS)
+                        val k = key(a)
+                        tapped.add(k)
+                        attempts[k] = (attempts[k] ?: 0) + 1
+                    }
+                    main.postDelayed({
+                        if (id != session || !autoOn) return@postDelayed
+                        waitSettled(id) { autoStep(id) }
+                    }, batch.size * TAP_GAP_MS + AFTER_TAP_MS)
+                }
+            }, 160L)
         }
     }
 
     // ------------------------------------------------------------------ cleanup
 
     override fun onDestroy() {
-        stopAuto(null)
-        stopSmart()
+        ++session
+        autoOn = false
+        smartOn = false
         main.removeCallbacksAndMessages(null)
         try {
             markerView?.let { wm.removeView(it) }
