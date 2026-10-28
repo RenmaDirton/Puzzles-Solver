@@ -22,8 +22,8 @@ android {
         applicationId = "com.puzzlesolver"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.5"
+        versionCode = 7
+        versionName = "0.6.1"
 
         // Phone target: 64-bit ARM only
         ndk {

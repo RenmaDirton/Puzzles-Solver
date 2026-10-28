@@ -35,7 +35,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         col.addView(TextView(this).apply {
-            text = "Puzzle solver 0.5"
+            text = "Puzzle solver 0.6.1"
             textSize = 26f
             setTextColor(Color.BLACK)
         })

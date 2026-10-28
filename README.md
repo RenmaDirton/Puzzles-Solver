@@ -1,4 +1,4 @@
-# Puzzle solver 0.5
+# Puzzle solver 0.6
 
 Floating overlay that solves **arrow mazes** (built and tested on screenshots from "Amaze Go!").
 Target: Android 8.0+ (minSdk 26), arm64-v8a only.
@@ -25,7 +25,7 @@ Colours the game uses, and what the app does with them:
 ## Panel buttons
 
 - **Smart**: keeps re-reading the board and shows a green dot on each arrow that can leave right now. Dots hide while arrows slide and come back when the screen is still.
-- **Auto**: scans twice (only the part of the plan both scans agree on is used), taps a chunk of the plan (one tap at a time, so Android never cancels one), pauses briefly, repeats. There is no 'still screen' wait any more. It stops (and marks the arrow red) if a tapped arrow hits something or will not move. It never skips ahead.
+- **Auto** (0.6: keeps going level after level - presses Next Level on the win screen, waits through ads and presses clearly labelled Close/Skip buttons; needs the accessibility service switched off and on once after this update because it now may read button labels): scans twice (only the part of the plan both scans agree on is used), taps a chunk of the plan (one tap at a time, so Android never cancels one), pauses briefly, repeats. There is no 'still screen' wait any more. It stops (and marks the arrow red) if a tapped arrow hits something or will not move. It never skips ahead.
 - **Speed**: 1 / 2 / 3 = how fast Auto taps and how big a chunk may get.
 - **Snap**: saves exactly what the app sees (without its own markers) to Pictures/PuzzleSolver, so a misread can be debugged from a real capture.
 - **X**: close.
@@ -60,7 +60,7 @@ screenshots on a normal JVM:
 (Screenshots taken while the overlay's green dots are showing are cleaned up by the test first.)
 `tools/reference/` has the Python version of the same logic plus a sliding-arrows simulator.
 
-## Known limits of 0.5
+## Known limits of 0.6
 
 - The Android layer (overlay, capture, auto-tap) has not been compiled or run on a device by me. The board reader and solver are compiled and tested on 5 real screenshots.
 - The board is looked for between 19% and 87% of the screen height; other layouts may need tuning.

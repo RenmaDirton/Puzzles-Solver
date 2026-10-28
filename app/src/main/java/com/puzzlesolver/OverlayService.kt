@@ -59,7 +59,7 @@ class OverlayService : Service() {
         private const val MAX_ATTEMPTS = 3
     }
 
-    private class Scan(val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int)
+    private class Scan(val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int, val win: Boolean = false)
 
     private lateinit var wm: WindowManager
     private val main = Handler(Looper.getMainLooper())
@@ -93,6 +93,8 @@ class OverlayService : Service() {
     private var unsure = 0
     private var stillRetries = 0
     private var recheck = 0
+    private var lostPolls = 0
+    private var levels = 0
     private var speedIdx = 1
     private var chunkSize = START_CHUNK
     private val tapped = HashSet<String>()
@@ -214,6 +216,20 @@ class OverlayService : Service() {
         }
     }
 
+    /** The purple "level complete" screen: purple at the top and on the Next Level button. */
+    private fun isWinScreen(f: BoardParser.Frame): Boolean {
+        fun purple(fx: Float, fy: Float): Boolean {
+            val x = (f.w * fx).toInt().coerceIn(0, f.w - 1)
+            val y = (f.h * fy).toInt().coerceIn(0, f.h - 1)
+            val p = f.pix[y * f.w + x]
+            val r = (p shr 16) and 255
+            val g = (p shr 8) and 255
+            val b = p and 255
+            return r in 85..160 && g < 50 && b in 115..185
+        }
+        return purple(0.5f, 0.03f) && purple(0.1f, 0.1f) && purple(0.3f, 0.757f) && purple(0.7f, 0.757f)
+    }
+
     private fun frameOrNull(bmp: Bitmap): BoardParser.Frame? =
         try {
             BoardParser.frameOf(bmp)
@@ -292,7 +308,7 @@ class OverlayService : Service() {
                 val r = res
                 main.post {
                     if (r != null) cal = r.cal
-                    cb(Scan(r, solved, f.sig, f.red))
+                    cb(Scan(r, solved, f.sig, f.red, isWinScreen(f)))
                 }
             }.start()
         }
@@ -431,6 +447,9 @@ class OverlayService : Service() {
 
     // ------------------------------------------------------------------ helpers
 
+    private fun winTapX() = resources.displayMetrics.widthPixels * 0.5f
+    private fun winTapY() = resources.displayMetrics.heightPixels * 0.757f
+
     private fun key(a: Arrow): String =
         "${(a.headX / 3f).roundToInt()},${(a.headY / 3f).roundToInt()},${a.dirC},${a.dirR}"
 
@@ -531,6 +550,8 @@ class OverlayService : Service() {
         redSeen = false
         clearMarkers()
         recheck = 0
+        lostPolls = 0
+        levels = 0
         status.text = "Auto: starting..."
         autoStep(id)
     }
@@ -573,15 +594,33 @@ class OverlayService : Service() {
             if (id != session || !autoOn) return@scanBoard
             val res1 = s1.res
             val solved1 = s1.solved
-            if (res1 == null || solved1 == null) {
-                autoFail("Auto stopped: cannot read the board (press Snap and send me the picture)")
+            if (s1.win) {
+                // level finished: press Next Level, then wait for the next board (maybe an ad first)
+                levels++
+                lostPolls = 0
+                tapped.clear(); attempts.clear(); recheck = 0; unsure = 0
+                chunkSize = START_CHUNK
+                cal = null
+                status.text = "Level done ($levels) - next level..."
+                AutoTapService.instance?.tap(winTapX(), winTapY(), 0L)
+                main.postDelayed({ autoStep(id) }, 2500L)
                 return@scanBoard
             }
-            if (res1.arrows.isEmpty()) {
-                stopAuto(if (res1.blockers.isEmpty()) "Board clear" else "Done, ${res1.blockers.size} unread shapes left")
-                clearMarkers()
+            if (res1 == null || solved1 == null || res1.arrows.isEmpty()) {
+                // no board on screen: level-complete animation, an ad, or a loading screen
+                lostPolls++
+                if (lostPolls > 45) {
+                    if (res1 != null && res1.arrows.isEmpty() && res1.blockers.isEmpty()) stopAuto("Board clear") else
+                        autoFail("Auto stopped: no board for a minute (ad? press Snap and send me the picture)")
+                    clearMarkers()
+                    return@scanBoard
+                }
+                val closed = lostPolls >= 3 && AutoTapService.instance?.tryCloseAd() == true
+                status.text = if (closed) "Auto: closed an ad" else "Auto: waiting for the board / ad... ($lostPolls)"
+                main.postDelayed({ autoStep(id) }, if (closed) 1200L else 1300L)
                 return@scanBoard
             }
+            lostPolls = 0
 
             // did the arrows we tapped last time leave?
             val still = res1.arrows.filter { key(it) in tapped }
