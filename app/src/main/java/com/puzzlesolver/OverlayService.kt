@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -22,6 +23,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.MediaStore
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
@@ -44,19 +46,19 @@ class OverlayService : Service() {
         /** Gap between two taps inside one batch. */
         private const val TAP_GAP_MS = 90L
 
-        /** Gold pixels on the board mean some arrow is still sliding off. */
-        private const val GOLD_MOVING = 120
-
-        /** Red pixels mean an arrow hit another one. */
+        /** Red pixels on the board mean an arrow hit something. */
         private const val RED_HIT = 150
 
-        private const val POLL_MS = 120L
-        private const val SETTLE_MAX_MS = 8000L
+        /** Two frames whose ink fingerprints differ by at most this many cells count as "the screen did not change". */
+        private const val STILL_DIFF = 25
+        private const val STILL_POLLS = 3
+        private const val POLL_MS = 150L
+        private const val SETTLE_MAX_MS = 6000L
         private const val AFTER_TAP_MS = 400L
         private const val MAX_ATTEMPTS = 3
     }
 
-    private class Scan(val res: ParseResult?, val solved: SolveResult?, val gold: Int, val red: Int)
+    private class Scan(val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int)
 
     private lateinit var wm: WindowManager
     private val main = Handler(Looper.getMainLooper())
@@ -84,12 +86,19 @@ class OverlayService : Service() {
     private var autoOn = false
     private var smartBusy = false
     private var followUps = 0
+    private var lastSmartSig: LongArray? = null
     private var redSeen = false
     private var unsure = 0
+    private var stillRetries = 0
     private val tapped = HashSet<String>()
     private val attempts = HashMap<String, Int>()
 
     private val smartTick = Runnable { smartStep() }
+
+    override fun onCreate() {
+        super.onCreate()
+        CrashLog.install(this)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -178,16 +187,34 @@ class OverlayService : Service() {
         )
     }
 
+    /**
+     * Copies the newest captured frame into a bitmap.
+     * The buffer is rewound first: when the screen is still, the same frame is read again and
+     * again, and a buffer that was already read once would otherwise be at its end and throw.
+     */
     private fun grabBitmap(): Bitmap? {
         synchronized(lock) {
             val img = latest ?: return null
-            val plane = img.planes[0]
-            val padded = plane.rowStride / plane.pixelStride
-            val full = Bitmap.createBitmap(padded, img.height, Bitmap.Config.ARGB_8888)
-            full.copyPixelsFromBuffer(plane.buffer)
-            return if (padded == img.width) full else Bitmap.createBitmap(full, 0, 0, img.width, img.height)
+            return try {
+                val plane = img.planes[0]
+                val buf = plane.buffer
+                buf.rewind()
+                val padded = plane.rowStride / plane.pixelStride
+                val full = Bitmap.createBitmap(padded, img.height, Bitmap.Config.ARGB_8888)
+                full.copyPixelsFromBuffer(buf)
+                if (padded == img.width) full else Bitmap.createBitmap(full, 0, 0, img.width, img.height)
+            } catch (e: Throwable) {
+                null
+            }
         }
     }
+
+    private fun frameOrNull(bmp: Bitmap): BoardParser.Frame? =
+        try {
+            BoardParser.frameOf(bmp)
+        } catch (e: Throwable) {
+            null
+        }
 
     /** Latest frame as raw pixels (converted off the main thread). Markers are left as they are. */
     private fun grabFrame(cb: (BoardParser.Frame?) -> Unit) {
@@ -197,17 +224,13 @@ class OverlayService : Service() {
             return
         }
         Thread {
-            val f = try {
-                BoardParser.frameOf(bmp)
-            } catch (e: Exception) {
-                null
-            }
+            val f = frameOrNull(bmp)
             main.post { cb(f) }
         }.start()
     }
 
     /** Like grabFrame, but hides our own markers first so they cannot end up in the picture. */
-    private fun captureClean(cb: (BoardParser.Frame?) -> Unit) {
+    private fun captureClean(cb: (Bitmap?, BoardParser.Frame?) -> Unit) {
         if (captureBusy) {
             main.postDelayed({ captureClean(cb) }, 100L)
             return
@@ -224,18 +247,14 @@ class OverlayService : Service() {
             if (hide) markerView?.visibility = View.VISIBLE
             if (bmp == null) {
                 captureBusy = false
-                cb(null)
+                cb(null, null)
                 return
             }
             Thread {
-                val f = try {
-                    BoardParser.frameOf(bmp)
-                } catch (e: Exception) {
-                    null
-                }
+                val f = frameOrNull(bmp)
                 main.post {
                     captureBusy = false
-                    cb(f)
+                    cb(bmp, f)
                 }
             }.start()
         }
@@ -247,51 +266,52 @@ class OverlayService : Service() {
         waitFrame()
     }
 
-    /** Clean capture, motion check and (when nothing is sliding) parse + solve. */
+    /** Clean capture, then parse + solve off the main thread. Never throws. */
     private fun scanBoard(cb: (Scan) -> Unit) {
-        captureClean { f ->
+        captureClean { _, f ->
             if (f == null) {
-                cb(Scan(null, null, 0, 0))
+                cb(Scan(null, null, null, 0))
                 return@captureClean
             }
             val calUsed = cal
             Thread {
-                val m = BoardParser.motion(f)
                 var res: ParseResult? = null
                 var solved: SolveResult? = null
-                if (m[0] < GOLD_MOVING) {
-                    res = try {
-                        BoardParser.parse(f, calUsed)
-                    } catch (e: Exception) {
-                        null
-                    }
+                try {
+                    res = BoardParser.parse(f, calUsed)
                     solved = res?.let { Solver.solve(it) }
+                } catch (e: Throwable) {
+                    res = null
+                    solved = null
                 }
+                val r = res
                 main.post {
-                    if (res != null) cal = res.cal
-                    cb(Scan(res, solved, m[0], m[1]))
+                    if (r != null) cal = r.cal
+                    cb(Scan(r, solved, f.sig, f.red))
                 }
             }.start()
         }
     }
 
     /**
-     * Waits until no arrow is sliding any more (no gold on the board for two checks in a row).
-     * Gives up after SETTLE_MAX_MS. Remembers whether red (a collision) showed up meanwhile.
+     * Waits until the screen has stopped changing (the ink fingerprint is the same for a few
+     * checks in a row), but never longer than SETTLE_MAX_MS. Remembers if red showed up meanwhile.
      */
     private fun waitSettled(id: Int, cb: () -> Unit) {
         val start = SystemClock.uptimeMillis()
-        var calm = 0
+        var prev: LongArray? = null
+        var still = 0
         fun poll() {
             if (id != session) return
             grabFrame { f ->
                 if (id != session) return@grabFrame
                 if (f != null) {
-                    val m = BoardParser.motion(f)
-                    if (m[1] >= RED_HIT) redSeen = true
-                    if (m[0] < GOLD_MOVING) calm++ else calm = 0
+                    if (f.red >= RED_HIT) redSeen = true
+                    val p = prev
+                    if (p != null && BoardCore.signatureDiff(p, f.sig) <= STILL_DIFF) still++ else still = 0
+                    prev = f.sig
                 }
-                if (calm >= 2 || SystemClock.uptimeMillis() - start > SETTLE_MAX_MS) {
+                if (still >= STILL_POLLS || SystemClock.uptimeMillis() - start > SETTLE_MAX_MS) {
                     cb()
                 } else {
                     main.postDelayed({ poll() }, POLL_MS)
@@ -299,6 +319,44 @@ class OverlayService : Service() {
             }
         }
         poll()
+    }
+
+    // ------------------------------------------------------------------ snapshot
+
+    /** Saves what the app sees (without its own markers) to Pictures/PuzzleSolver, so it can be sent for debugging. */
+    private fun snap() {
+        status.text = "Saving picture..."
+        captureClean { bmp, _ ->
+            if (bmp == null) {
+                status.text = "No picture yet, try again"
+                return@captureClean
+            }
+            Thread {
+                val msg = try {
+                    if (Build.VERSION.SDK_INT < 29) {
+                        "Snap needs Android 10 or newer"
+                    } else {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Images.Media.DISPLAY_NAME, "puzzle_${System.currentTimeMillis()}.png")
+                            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PuzzleSolver")
+                        }
+                        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                        if (uri == null) {
+                            "Could not save the picture"
+                        } else {
+                            contentResolver.openOutputStream(uri)?.use { out ->
+                                bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+                            }
+                            "Saved: Pictures/PuzzleSolver (see Gallery)"
+                        }
+                    }
+                } catch (e: Throwable) {
+                    "Save failed: ${e.javaClass.simpleName}"
+                }
+                main.post { status.text = msg }
+            }.start()
+        }
     }
 
     // ------------------------------------------------------------------ windows
@@ -366,15 +424,16 @@ class OverlayService : Service() {
             isAllCaps = false
             minWidth = 0
             minimumWidth = 0
-            setPadding(dp(10), 0, dp(10), 0)
+            setPadding(dp(9), 0, dp(9), 0)
             setOnClickListener { onClick() }
         }
 
         val scan = btn("Scan") { scanFull() }
         smartBtn = btn("Smart") { toggleSmart() }
         autoBtn = btn("Auto") { toggleAuto() }
+        val snap = btn("Snap") { snap() }
         val close = btn("X") { stopSelf() }
-        for (b in listOf(scan, smartBtn, autoBtn, close)) row.addView(b)
+        for (b in listOf(scan, smartBtn, autoBtn, snap, close)) row.addView(b)
 
         p.addView(status)
         p.addView(row)
@@ -420,7 +479,7 @@ class OverlayService : Service() {
                 val res = s.res
                 val solved = s.solved
                 if (res == null || solved == null || res.arrows.isEmpty()) {
-                    status.text = if (s.gold >= GOLD_MOVING) "Arrows are still moving, try again" else "Could not find a board. Open a level and try again."
+                    status.text = "Could not find a board. Open a level, then press Snap and send me the picture."
                     return@scanBoard
                 }
                 markerView?.items = solved.order.mapIndexed { i, a -> Marker(i + 1, a.headX, a.headY, a.round) }
@@ -440,6 +499,7 @@ class OverlayService : Service() {
             stopAuto(null)
             ++session
             smartOn = true
+            lastSmartSig = null
             smartBtn.text = "Smart ON"
             clearMarkers()
             status.text = "Smart scanning..."
@@ -474,15 +534,18 @@ class OverlayService : Service() {
             if (id != session || !smartOn) return@scanBoard
             val res = s.res
             val solved = s.solved
+            val prev = lastSmartSig
+            val sig = s.sig
+            lastSmartSig = sig
             var next = 3000L
-            if (res == null || solved == null) {
+            if (prev != null && sig != null && BoardCore.signatureDiff(prev, sig) > STILL_DIFF) {
+                // the picture changed since the last look: arrows may still be sliding, look again soon
                 clearMarkers()
-                if (s.gold >= GOLD_MOVING) {
-                    status.text = "Arrows moving..."
-                    next = 350L
-                } else {
-                    status.text = "No board found"
-                }
+                status.text = "Arrows moving..."
+                next = 350L
+            } else if (res == null || solved == null) {
+                clearMarkers()
+                status.text = "No board found (press Snap and send me the picture)"
             } else {
                 markerView?.items = res.arrows.filter { it.round == 0 }.map { Marker(0, it.headX, it.headY, 0) }
                 val now = res.arrows.count { it.round == 0 }
@@ -518,6 +581,7 @@ class OverlayService : Service() {
         tapped.clear()
         attempts.clear()
         unsure = 0
+        stillRetries = 0
         redSeen = false
         clearMarkers()
         status.text = "Auto: waiting for a still screen..."
@@ -542,9 +606,9 @@ class OverlayService : Service() {
     }
 
     /**
-     * One round of the loop. The screen is already still when this runs.
+     * One round of the loop. The screen has (best effort) stopped changing when this runs.
      *   1. scan; if an arrow we tapped is still there, stop (red = it hit something)
-     *   2. scan again 160 ms later and only keep arrows that both scans agree are free
+     *   2. scan again 160 ms later; only arrows that both scans agree are free are used
      *   3. tap a batch whose exit paths do not touch each other
      *   4. wait for the sliding to finish, then repeat
      * It never moves on to "the next arrow" after a problem: it stops and shows what went wrong.
@@ -555,11 +619,7 @@ class OverlayService : Service() {
             if (id != session || !autoOn) return@scanBoard
             val res1 = s1.res
             if (res1 == null) {
-                if (s1.gold >= GOLD_MOVING) {
-                    waitSettled(id) { autoStep(id) }
-                } else {
-                    autoFail("Auto stopped: cannot read the board")
-                }
+                autoFail("Auto stopped: cannot read the board (press Snap and send me the picture)")
                 return@scanBoard
             }
             if (res1.arrows.isEmpty()) {
@@ -599,11 +659,16 @@ class OverlayService : Service() {
                 scanBoard { s2 ->
                     if (id != session || !autoOn) return@scanBoard
                     val res2 = s2.res
-                    if (res2 == null) {
-                        // something moved between the two scans: start over from a still screen
+                    val sigA = s1.sig
+                    val sigB = s2.sig
+                    val changed = sigA != null && sigB != null && BoardCore.signatureDiff(sigA, sigB) > STILL_DIFF
+                    if (res2 == null || (changed && stillRetries < 3)) {
+                        // the picture changed between the two scans: wait for it to settle and start over
+                        stillRetries++
                         waitSettled(id) { autoStep(id) }
                         return@scanBoard
                     }
+                    if (!changed) stillRetries = 0
                     val batch = Planner.safeBatch(res2).filter { key(it) in free1 }
                     if (batch.isEmpty()) {
                         unsure++
@@ -615,12 +680,11 @@ class OverlayService : Service() {
                         return@scanBoard
                     }
                     unsure = 0
-                    status.text = "Auto: tapping ${batch.size} | ${res2.arrows.size} left"
-                    val svc = AutoTapService.instance
-                    if (svc == null) {
+                    if (AutoTapService.instance == null) {
                         autoFail("Auto stopped: accessibility service is off")
                         return@scanBoard
                     }
+                    status.text = "Auto: tapping ${batch.size} | ${res2.arrows.size} left"
                     batch.forEachIndexed { i, a ->
                         main.postDelayed({
                             if (id != session || !autoOn) return@postDelayed

@@ -27,6 +27,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
 
         val pad = (20 * resources.displayMetrics.density).toInt()
         val col = LinearLayout(this).apply {
@@ -34,7 +35,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         col.addView(TextView(this).apply {
-            text = "Puzzle solver 0.2"
+            text = "Puzzle solver 0.3"
             textSize = 26f
             setTextColor(Color.BLACK)
         })
@@ -63,6 +64,10 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Find \"Puzzle solver auto-tap\" and turn it on", Toast.LENGTH_LONG).show()
         }
         button("3. Start Puzzle solver") { start() }
+        button("Clear crash report") {
+            CrashLog.clear(this)
+            onResume()
+        }
         button("Stop") {
             startService(Intent(this, OverlayService::class.java).setAction(OverlayService.ACTION_STOP))
         }
@@ -74,7 +79,9 @@ class MainActivity : Activity() {
         super.onResume()
         val overlay = Settings.canDrawOverlays(this)
         val acc = AutoTapService.instance != null
-        info.text = "Overlay permission: ${if (overlay) "OK" else "missing"}\n" +
+        val crash = CrashLog.read(this)
+        val crashText = if (crash != null) "LAST CRASH (send me this):\n" + crash.take(1800) + "\n\n" else ""
+        info.text = crashText + "Overlay permission: ${if (overlay) "OK" else "missing"}\n" +
             "Auto-tap service: ${if (acc) "on" else "off (optional: you can tap by hand using the numbers)"}\n\n" +
             "How to use: press Start, allow screen capture, open Amaze Go! and a level.\n" +
             "Smart: keeps watching the board and shows a green dot on every arrow that can leave right now. " +

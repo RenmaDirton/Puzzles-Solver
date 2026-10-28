@@ -105,6 +105,42 @@ object BoardCore {
         return Masks(ink, struct)
     }
 
+    /**
+     * A compact fingerprint of the dark ink in the board band (one bit per 3x3 pixels).
+     * Two frames of a still screen give identical fingerprints; if any arrow is sliding the
+     * fingerprints differ a lot. This does not depend on any particular colour.
+     */
+    fun inkSignature(pix: IntArray, w: Int, h: Int): LongArray {
+        val y0 = (h * BAND_TOP).toInt()
+        val y1 = (h * BAND_BOT).toInt()
+        val bg = pix[(h / 2) * w + 8]
+        val bgR = (bg shr 16) and 0xFF
+        val bgG = (bg shr 8) and 0xFF
+        val bgB = bg and 0xFF
+        val nx = w / 3
+        val ny = (y1 - y0) / 3
+        val out = LongArray((nx * ny + 63) / 64)
+        var k = 0
+        for (j in 0 until ny) {
+            val base = (y0 + j * 3) * w
+            for (i in 0 until nx) {
+                val p = pix[base + i * 3]
+                val d = abs(((p shr 16) and 0xFF) - bgR) + abs(((p shr 8) and 0xFF) - bgG) + abs((p and 0xFF) - bgB)
+                if (d > 165) out[k ushr 6] = out[k ushr 6] or (1L shl (k and 63))
+                k++
+            }
+        }
+        return out
+    }
+
+    /** Number of fingerprint cells that differ (a huge number if the sizes do not match). */
+    fun signatureDiff(a: LongArray, b: LongArray): Int {
+        if (a.size != b.size) return Int.MAX_VALUE
+        var n = 0
+        for (i in a.indices) n += java.lang.Long.bitCount(a[i] xor b[i])
+        return n
+    }
+
     /** Counts gold (arrow is sliding) and red (arrow hit something) pixels inside the board band. */
     fun motionCounts(pix: IntArray, w: Int, h: Int): IntArray {
         val y0 = (h * BAND_TOP).toInt()

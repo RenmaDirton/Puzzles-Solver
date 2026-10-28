@@ -34,6 +34,7 @@ fun main(args: Array<String>) {
             }
             for (i in pix.indices) if (gone[i]) pix[i] = bg
         }
+        if (System.getenv("EXTRA") != null) extraChecks(pix, w, h)
         val t0 = System.nanoTime()
         val res = BoardCore.parse(pix, w, h, null)
         val ms = (System.nanoTime() - t0) / 1_000_000
@@ -54,4 +55,40 @@ fun main(args: Array<String>) {
                 ),
         )
     }
+}
+
+/** Motion fingerprint and colour-shift robustness checks. */
+fun extraChecks(pix: IntArray, w: Int, h: Int) {
+    val sig = BoardCore.inkSignature(pix, w, h)
+    // 1) identical frame
+    println("   fingerprint: same frame diff = ${BoardCore.signatureDiff(sig, BoardCore.inkSignature(pix, w, h))}")
+    // 2) sensor-like noise on 2% of pixels
+    val rnd = java.util.Random(1)
+    val noisy = pix.copyOf()
+    for (i in noisy.indices) if (rnd.nextInt(50) == 0) {
+        val d = rnd.nextInt(9) - 4
+        val r = (((noisy[i] shr 16) and 0xFF) + d).coerceIn(0, 255)
+        val g = (((noisy[i] shr 8) and 0xFF) + d).coerceIn(0, 255)
+        val b = ((noisy[i] and 0xFF) + d).coerceIn(0, 255)
+        noisy[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+    }
+    println("   fingerprint: noisy frame diff = ${BoardCore.signatureDiff(sig, BoardCore.inkSignature(noisy, w, h))}")
+    // 3) the whole picture moved 6 px (a slow slide)
+    val moved = IntArray(pix.size)
+    for (y in 0 until h) for (x in 0 until w) moved[y * w + x] = pix[y * w + maxOf(0, x - 6)]
+    println("   fingerprint: shifted 6px diff = ${BoardCore.signatureDiff(sig, BoardCore.inkSignature(moved, w, h))}")
+    // 4) colour shifts: does the reading survive?
+    fun shift(name: String, f: (Int, Int, Int) -> IntArray) {
+        val out = IntArray(pix.size)
+        for (i in pix.indices) {
+            val c = f((pix[i] shr 16) and 0xFF, (pix[i] shr 8) and 0xFF, pix[i] and 0xFF)
+            out[i] = (0xFF shl 24) or (c[0].coerceIn(0, 255) shl 16) or (c[1].coerceIn(0, 255) shl 8) or c[2].coerceIn(0, 255)
+        }
+        val res = BoardCore.parse(out, w, h, null)
+        println("   colour $name: " + (res?.let { "arrows ${it.arrows.size} blockers ${it.blockers.size}" } ?: "PARSE FAILED"))
+    }
+    shift("warm") { r, g, b -> intArrayOf(r + 8, g, b - 14) }
+    shift("vivid") { r, g, b -> val m = (r + g + b) / 3; intArrayOf(m + ((r - m) * 1.25f).toInt(), m + ((g - m) * 1.25f).toInt(), m + ((b - m) * 1.25f).toInt()) }
+    shift("dim") { r, g, b -> intArrayOf((r * 0.9f).toInt(), (g * 0.9f).toInt(), (b * 0.9f).toInt()) }
+    shift("cool") { r, g, b -> intArrayOf(r - 8, g, b + 10) }
 }

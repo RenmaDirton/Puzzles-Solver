@@ -1,4 +1,4 @@
-# Puzzle solver 0.2
+# Puzzle solver 0.3
 
 Floating overlay that solves **arrow mazes** (built and tested on screenshots from "Amaze Go!").
 Target: Android 8.0+ (minSdk 26), arm64-v8a only.
@@ -17,7 +17,7 @@ Target: Android 8.0+ (minSdk 26), arm64-v8a only.
 Colours the game uses, and what the app does with them:
 
 - **brown** = normal arrow
-- **gold with a fading tail** = an arrow that is sliding off the board. The app waits until no gold is left before it reads the board again.
+- **gold with a fading tail** = an arrow that is sliding off the board. The app does not rely on colour to know that something moves: it compares consecutive frames (an ink fingerprint) and waits until the picture stops changing.
 - **red** = an arrow that hit something. Auto stops and marks it.
 - faint tan dots = cleared cells (used to find the grid, never read as arrows)
 
@@ -26,7 +26,10 @@ Colours the game uses, and what the app does with them:
 - **Scan**: one-off numbered plan for the whole level (static).
 - **Smart**: keeps re-reading the board and shows a green dot on each arrow that can leave right now. Dots hide while arrows slide and come back when the screen is still.
 - **Auto**: waits for a still screen, scans twice (only arrows both scans agree on are used), taps a safe batch, waits for the sliding to finish, repeats. It stops (and marks the arrow red) if a tapped arrow hits something or will not move. It never skips ahead.
+- **Snap**: saves exactly what the app sees (without its own markers) to Pictures/PuzzleSolver, so a misread can be debugged from a real capture.
 - **X**: close.
+
+If the app ever crashes, the reason is saved and shown at the top of the app's main screen the next time you open it.
 
 ## Build
 
@@ -54,7 +57,7 @@ screenshots on a normal JVM:
 (Screenshots taken while the overlay's green dots are showing are cleaned up by the test first.)
 `tools/reference/` has the Python version of the same logic plus a sliding-arrows simulator.
 
-## Known limits of 0.2
+## Known limits of 0.3
 
 - The Android layer (overlay, capture, auto-tap) has not been compiled or run on a device by me. The board reader and solver are compiled and tested on 5 real screenshots.
 - The board is looked for between 19% and 87% of the screen height; other layouts may need tuning.
