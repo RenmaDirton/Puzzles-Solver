@@ -43,8 +43,11 @@ class OverlayService : Service() {
         const val ACTION_STOP = "com.puzzlesolver.STOP"
         private const val CHANNEL = "puzzle_solver"
 
-        /** Gap between two taps inside one batch. */
-        private const val TAP_GAP_MS = 90L
+        /** Speed levels: gap between two taps (ms) and the most arrows tapped before the screen is checked again. */
+        private val TAP_GAPS = longArrayOf(100L, 70L, 50L)
+        private val MAX_CHUNKS = intArrayOf(20, 40, 80)
+        private const val START_CHUNK = 10
+        private const val MIN_CHUNK = 4
 
         /** Red pixels on the board mean an arrow hit something. */
         private const val RED_HIT = 150
@@ -76,6 +79,7 @@ class OverlayService : Service() {
     private lateinit var status: TextView
     private lateinit var smartBtn: Button
     private lateinit var autoBtn: Button
+    private lateinit var speedBtn: Button
 
     private var cal: Calibration? = null
     private var captureBusy = false
@@ -90,6 +94,8 @@ class OverlayService : Service() {
     private var redSeen = false
     private var unsure = 0
     private var stillRetries = 0
+    private var speedIdx = 1
+    private var chunkSize = START_CHUNK
     private val tapped = HashSet<String>()
     private val attempts = HashMap<String, Int>()
 
@@ -428,12 +434,12 @@ class OverlayService : Service() {
             setOnClickListener { onClick() }
         }
 
-        val scan = btn("Scan") { scanFull() }
         smartBtn = btn("Smart") { toggleSmart() }
         autoBtn = btn("Auto") { toggleAuto() }
+        speedBtn = btn("Speed 2") { cycleSpeed() }
         val snap = btn("Snap") { snap() }
         val close = btn("X") { stopSelf() }
-        for (b in listOf(scan, smartBtn, autoBtn, snap, close)) row.addView(b)
+        for (b in listOf(smartBtn, autoBtn, speedBtn, snap, close)) row.addView(b)
 
         p.addView(status)
         p.addView(row)
@@ -463,30 +469,6 @@ class OverlayService : Service() {
 
     private fun unreadText(res: ParseResult) =
         if (res.blockers.isNotEmpty()) " | ${res.blockers.size} unread" else ""
-
-    // ------------------------------------------------------------------ Scan (numbered plan)
-
-    private fun scanFull() {
-        stopAuto(null)
-        stopSmart()
-        val id = ++session
-        cal = null
-        clearMarkers()
-        status.text = "Scanning..."
-        waitSettled(id) {
-            scanBoard { s ->
-                if (id != session) return@scanBoard
-                val res = s.res
-                val solved = s.solved
-                if (res == null || solved == null || res.arrows.isEmpty()) {
-                    status.text = "Could not find a board. Open a level, then press Snap and send me the picture."
-                    return@scanBoard
-                }
-                markerView?.items = solved.order.mapIndexed { i, a -> Marker(i + 1, a.headX, a.headY, a.round) }
-                status.text = "${res.arrows.size} arrows, ${solved.rounds} rounds${unreadText(res)}"
-            }
-        }
-    }
 
     // ------------------------------------------------------------------ Smart scan
 
@@ -582,6 +564,7 @@ class OverlayService : Service() {
         attempts.clear()
         unsure = 0
         stillRetries = 0
+        chunkSize = START_CHUNK
         redSeen = false
         clearMarkers()
         status.text = "Auto: waiting for a still screen..."
@@ -605,12 +588,22 @@ class OverlayService : Service() {
         if (at != null) markerView?.items = listOf(Marker(0, at.headX, at.headY, -2))
     }
 
+    private fun cycleSpeed() {
+        speedIdx = (speedIdx + 1) % TAP_GAPS.size
+        speedBtn.text = "Speed ${speedIdx + 1}"
+    }
+
     /**
-     * One round of the loop. The screen has (best effort) stopped changing when this runs.
-     *   1. scan; if an arrow we tapped is still there, stop (red = it hit something)
-     *   2. scan again 160 ms later; only arrows that both scans agree are free are used
-     *   3. tap a batch whose exit paths do not touch each other
-     *   4. wait for the sliding to finish, then repeat
+     * One step of Auto. The screen has (best effort) stopped changing when this runs.
+     *
+     * An arrow that was already tapped does not hurt the arrows behind it, even while it is
+     * still sliding. So there is no need to wait for each round to leave: the solution is
+     * tapped in order (arrows with an open path first) in one go, in chunks.
+     *   1. scan; check that everything tapped in the last chunk really left
+     *      (red = hit something: stop; still there = a tap was missed: smaller chunk, retry)
+     *   2. scan again 160 ms later; only the start of the plan that both scans agree on is used
+     *   3. tap that chunk, one arrow every few dozen milliseconds
+     *   4. wait for the screen to settle, then repeat. Clean chunks make the next one bigger.
      * It never moves on to "the next arrow" after a problem: it stops and shows what went wrong.
      */
     private fun autoStep(id: Int) {
@@ -618,7 +611,8 @@ class OverlayService : Service() {
         scanBoard { s1 ->
             if (id != session || !autoOn) return@scanBoard
             val res1 = s1.res
-            if (res1 == null) {
+            val solved1 = s1.solved
+            if (res1 == null || solved1 == null) {
                 autoFail("Auto stopped: cannot read the board (press Snap and send me the picture)")
                 return@scanBoard
             }
@@ -644,33 +638,45 @@ class OverlayService : Service() {
                     autoFail("Auto stopped: an arrow will not move", worst)
                     return@scanBoard
                 }
+                chunkSize = maxOf(MIN_CHUNK, chunkSize / 2)
+            } else if (tapped.isNotEmpty()) {
+                chunkSize = minOf(MAX_CHUNKS[speedIdx], chunkSize * 2)
             }
             tapped.clear()
             redSeen = false
 
-            val free1 = res1.arrows.filter { it.round == 0 }.map { key(it) }.toHashSet()
-            if (free1.isEmpty()) {
+            if (solved1.order.none { it.round == 0 }) {
                 autoFail("Auto stopped: ${res1.arrows.size} arrows cannot move${unreadText(res1)}")
                 return@scanBoard
             }
+            val round1 = HashMap<String, Int>()
+            for (a in res1.arrows) round1[key(a)] = a.round
 
             main.postDelayed({
                 if (id != session || !autoOn) return@postDelayed
                 scanBoard { s2 ->
                     if (id != session || !autoOn) return@scanBoard
                     val res2 = s2.res
+                    val solved2 = s2.solved
                     val sigA = s1.sig
                     val sigB = s2.sig
                     val changed = sigA != null && sigB != null && BoardCore.signatureDiff(sigA, sigB) > STILL_DIFF
-                    if (res2 == null || (changed && stillRetries < 3)) {
+                    if (res2 == null || solved2 == null || (changed && stillRetries < 3)) {
                         // the picture changed between the two scans: wait for it to settle and start over
                         stillRetries++
                         waitSettled(id) { autoStep(id) }
                         return@scanBoard
                     }
                     if (!changed) stillRetries = 0
-                    val batch = Planner.safeBatch(res2).filter { key(it) in free1 }
-                    if (batch.isEmpty()) {
+
+                    // the start of the plan (in solving order) that both scans agree on
+                    val plan = ArrayList<Arrow>()
+                    for (a in solved2.order) {
+                        if (round1[key(a)] != a.round) break
+                        plan.add(a)
+                        if (plan.size >= chunkSize) break
+                    }
+                    if (plan.isEmpty()) {
                         unsure++
                         if (unsure > 3) {
                             autoFail("Auto stopped: scans keep disagreeing")
@@ -684,12 +690,13 @@ class OverlayService : Service() {
                         autoFail("Auto stopped: accessibility service is off")
                         return@scanBoard
                     }
-                    status.text = "Auto: tapping ${batch.size} | ${res2.arrows.size} left"
-                    batch.forEachIndexed { i, a ->
+                    val gap = TAP_GAPS[speedIdx]
+                    status.text = "Auto: tapping ${plan.size} | ${res2.arrows.size} left"
+                    plan.forEachIndexed { i, a ->
                         main.postDelayed({
                             if (id != session || !autoOn) return@postDelayed
                             AutoTapService.instance?.tap(a.tapX, a.tapY)
-                        }, i * TAP_GAP_MS)
+                        }, i * gap)
                         val k = key(a)
                         tapped.add(k)
                         attempts[k] = (attempts[k] ?: 0) + 1
@@ -697,7 +704,7 @@ class OverlayService : Service() {
                     main.postDelayed({
                         if (id != session || !autoOn) return@postDelayed
                         waitSettled(id) { autoStep(id) }
-                    }, batch.size * TAP_GAP_MS + AFTER_TAP_MS)
+                    }, plan.size * gap + AFTER_TAP_MS)
                 }
             }, 160L)
         }

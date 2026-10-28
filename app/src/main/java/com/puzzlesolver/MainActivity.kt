@@ -35,7 +35,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         col.addView(TextView(this).apply {
-            text = "Puzzle solver 0.3"
+            text = "Puzzle solver 0.4"
             textSize = 26f
             setTextColor(Color.BLACK)
         })
@@ -82,14 +82,14 @@ class MainActivity : Activity() {
         val crash = CrashLog.read(this)
         val crashText = if (crash != null) "LAST CRASH (send me this):\n" + crash.take(1800) + "\n\n" else ""
         info.text = crashText + "Overlay permission: ${if (overlay) "OK" else "missing"}\n" +
-            "Auto-tap service: ${if (acc) "on" else "off (optional: you can tap by hand using the numbers)"}\n\n" +
+            "Auto-tap service: ${if (acc) "on" else "off (needed for Auto; Smart works without it)"}\n\n" +
             "How to use: press Start, allow screen capture, open Amaze Go! and a level.\n" +
             "Smart: keeps watching the board and shows a green dot on every arrow that can leave right now. " +
             "Dots disappear while arrows are sliding and come back when the screen is still.\n" +
-            "Auto: waits for a still screen, scans twice, taps arrows whose exit paths do not cross, " +
-            "waits for them to leave, repeats. If a tapped arrow hits something or will not move " +
-            "it stops and marks it red instead of moving on.\n" +
-            "Scan: one-off numbered plan for the whole level."
+            "Auto: taps the whole solution in order, in chunks, checking after each chunk that every " +
+            "tapped arrow left. If one hits something or will not move it stops and marks it red.\n" +
+            "Speed: how fast Auto taps (1 slow, 3 fast).\n" +
+            "Snap: saves a picture of what the app sees (Gallery > PuzzleSolver) for debugging."
     }
 
     private fun start() {

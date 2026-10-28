@@ -1,4 +1,4 @@
-# Puzzle solver 0.3
+# Puzzle solver 0.4
 
 Floating overlay that solves **arrow mazes** (built and tested on screenshots from "Amaze Go!").
 Target: Android 8.0+ (minSdk 26), arm64-v8a only.
@@ -10,9 +10,10 @@ Target: Android 8.0+ (minSdk 26), arm64-v8a only.
    into one arrow. The head is the end whose surroundings are filled by the arrowhead triangle.
 3. `Solver` marks an arrow as free when the straight line from its head to the edge crosses no
    other arrow still on the board.
-4. `Planner` picks which free arrows may be tapped together: only arrows whose exit paths do not
-   cross. (Two arrows that are both free can still crash into each other while sliding if their
-   exit paths cross. Simulated on real boards this was ~10-15% of taps; with the rule it is 0.)
+4. Auto taps the solution in order (arrows with an open path first). An arrow that was already
+   tapped does not hurt arrows behind it even while it is still sliding, so it does not wait for
+   each round to leave. It taps a chunk, waits for the screen to settle, checks that everything
+   tapped really left, and makes the next chunk bigger (or smaller after a missed tap).
 
 Colours the game uses, and what the app does with them:
 
@@ -23,9 +24,9 @@ Colours the game uses, and what the app does with them:
 
 ## Panel buttons
 
-- **Scan**: one-off numbered plan for the whole level (static).
 - **Smart**: keeps re-reading the board and shows a green dot on each arrow that can leave right now. Dots hide while arrows slide and come back when the screen is still.
-- **Auto**: waits for a still screen, scans twice (only arrows both scans agree on are used), taps a safe batch, waits for the sliding to finish, repeats. It stops (and marks the arrow red) if a tapped arrow hits something or will not move. It never skips ahead.
+- **Auto**: waits for a still screen, scans twice (only the part of the plan both scans agree on is used), taps a chunk of the plan, waits for the screen to settle, repeats. It stops (and marks the arrow red) if a tapped arrow hits something or will not move. It never skips ahead.
+- **Speed**: 1 / 2 / 3 = how fast Auto taps and how big a chunk may get.
 - **Snap**: saves exactly what the app sees (without its own markers) to Pictures/PuzzleSolver, so a misread can be debugged from a real capture.
 - **X**: close.
 
@@ -38,7 +39,9 @@ If the app ever crashes, the reason is saved and shown at the top of the app's m
 **No PC tooling:** push this folder to a GitHub repo. The workflow in
 `.github/workflows/build.yml` builds the debug APK; download it from the run's
 Artifacts (`puzzle-solver-debug-apk`), copy to the phone, install.
-Debug APKs from CI are signed with a different key every run, so uninstall the old version before installing a new one.
+Every build is signed with the key in `app/debug.keystore`, so a new APK installs over the old one and keeps its permissions
+(only the very first install of a build signed with this key needs an uninstall of an older, differently signed one).
+This is a throwaway key for a personal app; if the repo is public anyone can read it, so keep the repo private if that matters.
 
 ## Use
 
@@ -57,7 +60,7 @@ screenshots on a normal JVM:
 (Screenshots taken while the overlay's green dots are showing are cleaned up by the test first.)
 `tools/reference/` has the Python version of the same logic plus a sliding-arrows simulator.
 
-## Known limits of 0.3
+## Known limits of 0.4
 
 - The Android layer (overlay, capture, auto-tap) has not been compiled or run on a device by me. The board reader and solver are compiled and tested on 5 real screenshots.
 - The board is looked for between 19% and 87% of the screen height; other layouts may need tuning.
