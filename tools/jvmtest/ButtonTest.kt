@@ -11,6 +11,6 @@ fun main(args: Array<String>) {
         val pix = IntArray(w * h)
         img.getRGB(0, 0, w, h, pix, 0, w)
         val bs = BoardCore.findButtons(pix, w, h)
-        println(File(path).name + ": " + bs.joinToString { "y=%.3f contrast=%d".format(it.cy.toFloat() / h, it.contrast) } + " cornerGlyph=" + BoardCore.cornerGlyph(pix, w, h))
+        println(File(path).name + ": " + bs.joinToString { "y=%.3f contrast=%d".format(it.cy.toFloat() / h, it.contrast) } + " ink=%.4f".format(BoardCore.inkFraction(pix, w, h)))
     }
 }

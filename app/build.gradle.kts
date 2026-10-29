@@ -22,8 +22,8 @@ android {
         applicationId = "com.puzzlesolver"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.9"
+        versionCode = 11
+        versionName = "0.6"
 
         // Phone target: 64-bit ARM only
         ndk {
@@ -44,4 +44,9 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    // reads words on the screen, on the phone (the model is inside the app)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 }

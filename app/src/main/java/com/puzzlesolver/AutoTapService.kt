@@ -68,68 +68,34 @@ class AutoTapService : AccessibilityService() {
     }
 
     /**
-     * Looks for a clearly labelled Close / Skip button on the screen (ads) and presses it.
-     * Ads that draw their X as an unlabelled picture cannot be found this way.
+     * Presses a button or text on screen whose accessibility label contains [word] (case-insensitive).
+     * Games that draw their own text (no labels) are handled by reading the screenshot instead.
      */
-    fun tryCloseAd(): Boolean {
+    fun pressText(word: String): Boolean {
         return try {
             val root = rootInActiveWindow ?: return false
             if (root.packageName?.toString() == packageName) return false
-            val dm = resources.displayMetrics
-            val sw = dm.widthPixels
-            val sh = dm.heightPixels
-            val exact = setOf("close", "x", "\u00d7", "\u2715", "\u2716", "\u2573", "no thanks", "no, thanks", "dismiss",
-                "continue", "done", "not now", "maybe later", "skip", "close ad", "skip ad", "skip ads", "skip video")
+            val want = word.trim().lowercase()
+            if (want.isEmpty()) return false
             val stack = ArrayDeque<AccessibilityNodeInfo>()
             stack.addLast(root)
-            val nodes = ArrayList<AccessibilityNodeInfo>()
-            while (stack.isNotEmpty() && nodes.size < 800) {
+            var seen = 0
+            while (stack.isNotEmpty() && seen < 800) {
                 val n = stack.removeLast()
-                nodes.add(n)
+                seen++
+                val l = (n.text?.toString() ?: n.contentDescription?.toString() ?: "").trim().lowercase()
+                if (l.isNotEmpty() && l.length <= want.length + 12 && l.contains(want)) {
+                    var c: AccessibilityNodeInfo? = n
+                    var hops = 0
+                    while (c != null && hops < 4) {
+                        if (c.isClickable && c.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                        c = c.parent
+                        hops++
+                    }
+                }
                 for (i in 0 until n.childCount) n.getChild(i)?.let { stack.addLast(it) }
             }
-            fun press(n: AccessibilityNodeInfo): Boolean {
-                var c: AccessibilityNodeInfo? = n
-                var hops = 0
-                while (c != null && hops < 4) {
-                    if (c.isClickable && c.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-                    c = c.parent
-                    hops++
-                }
-                return false
-            }
-            fun label(n: AccessibilityNodeInfo) =
-                (n.text?.toString() ?: n.contentDescription?.toString() ?: "").trim().lowercase()
-
-            // 1. clearly labelled: Close, X, Skip, "Skip >>", "Close ad (3)" ...
-            for (n in nodes) {
-                val l = label(n)
-                if (l.isEmpty() || l.length > 24) continue
-                val hit = l in exact || l.startsWith("skip") || l.startsWith("close") ||
-                    l.startsWith("\u2715") || l.startsWith("\u00d7") || l.endsWith(">>") && l.length <= 8
-                if (hit && press(n)) return true
-            }
-            // 2. an unlabelled (or "close"-labelled) small button in a top corner: the usual X
-            val r = android.graphics.Rect()
-            var best: AccessibilityNodeInfo? = null
-            var bestScore = -1
-            for (n in nodes) {
-                if (!n.isClickable || !n.isVisibleToUser) continue
-                n.getBoundsInScreen(r)
-                val bw = r.width()
-                val bh = r.height()
-                if (bw < 24 || bh < 24 || bw > 190 || bh > 190) continue
-                if (r.centerY() > sh * 0.14f) continue
-                val inRight = r.centerX() > sw * 0.78f
-                val inLeft = r.centerX() < sw * 0.22f
-                if (!inRight && !inLeft) continue
-                val l = label(n)
-                if (l.isNotEmpty() && !l.contains("close") && !l.contains("skip")) continue
-                val score = (if (inRight) 2 else 1) + (if (l.isNotEmpty()) 3 else 0)
-                if (score > bestScore) { bestScore = score; best = n }
-            }
-            val pick = best
-            pick != null && press(pick)
+            false
         } catch (_: Exception) {
             false
         }

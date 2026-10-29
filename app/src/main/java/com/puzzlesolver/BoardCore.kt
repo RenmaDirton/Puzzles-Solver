@@ -76,12 +76,21 @@ object BoardCore {
     fun parse(pix: IntArray, w: Int, h: Int, cached: Calibration?): ParseResult? {
         val m = masks(pix, w, h)
         var cal: Calibration? = cached
-        // a cached lattice stays valid while it explains the ink about as well as when it was fitted
-        // (sparse boards with big arrowheads never reach 0.9, so a fixed 0.9 refitted on every scan)
-        if (cal != null && explained(m.ink, w, h, cal) < min(0.90f, cal.exp - 0.08f)) cal = null
+        // The lattice of a level never changes, so a cached one stays valid while it still explains a good share
+        // of the ink. (Near the end of a level only a few arrows are left and the share drops; refitting then
+        // picked wrong sizes such as 51 instead of 25.)
+        if (cal != null && explained(m.ink, w, h, cal) < cal.exp * 0.6f) cal = null
         val fresh = cal == null
         val first = cal ?: pickCalibration(m, w, h) ?: return null
         var best = parseWith(m.ink, w, h, first)
+        if (!fresh && quality(best) < 0) {
+            // the stored lattice reads badly (a different board?): fit a new one and keep whichever reads better
+            val c = pickCalibration(m, w, h)
+            if (c != null) {
+                val r = parseWith(m.ink, w, h, c)
+                if (quality(r) > quality(best)) best = r
+            }
+        }
         if (fresh && quality(best) < 0) {
             // suspicious result: try the neighbouring lattice sizes before giving up
             for (p in floatArrayOf(first.px * 2f, first.px / 2f, first.px * 3f)) {
@@ -773,6 +782,33 @@ object BoardCore {
             if (hh >= h * 0.04f && hh <= h * 0.10f && cnt >= hh * 0.7f) res.add(Button((top + last) / 2, sum / cnt))
         }
         return res
+    }
+
+    // ------------------------------------------------------------------ quick "is this a board?" test
+
+    /** Share of ink pixels in the board band. Boards are mostly thin lines; menus, ads and videos are not. */
+    fun inkFraction(pix: IntArray, w: Int, h: Int): Float {
+        val bg = pix[(h / 2) * w + 8]
+        val bgR = (bg shr 16) and 0xFF
+        val bgG = (bg shr 8) and 0xFF
+        val bgB = bg and 0xFF
+        val y0 = (h * BAND_TOP).toInt()
+        val y1 = (h * BAND_BOT).toInt()
+        var n = 0
+        var tot = 0
+        var y = y0
+        while (y < y1) {
+            var x = 0
+            while (x < w) {
+                val p = pix[y * w + x]
+                val d = abs(((p shr 16) and 0xFF) - bgR) + abs(((p shr 8) and 0xFF) - bgG) + abs((p and 0xFF) - bgB)
+                if (d > 165) n++
+                tot++
+                x += 3
+            }
+            y += 3
+        }
+        return if (tot == 0) 0f else n.toFloat() / tot
     }
 
     // ------------------------------------------------------------------ ad skip control

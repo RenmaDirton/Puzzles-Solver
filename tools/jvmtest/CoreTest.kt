@@ -63,6 +63,16 @@ fun main(args: Array<String>) {
             val again = BoardCore.parse(pix, w, h, res.cal)
             println("   cached parse: %d ms, pitch %.2f, arrows %d".format((System.nanoTime() - t1) / 1_000_000, again?.cal?.px ?: -1f, again?.arrows?.size ?: -1))
         }
+        if (System.getenv("CROSS") != null) {
+            val img2 = ImageIO.read(File(System.getenv("CROSS")))
+            val pix2 = IntArray(img2.width * img2.height)
+            img2.getRGB(0, 0, img2.width, img2.height, pix2, 0, img2.width)
+            val other = BoardCore.parse(pix2, img2.width, img2.height, null)
+            if (other != null) {
+                val r2 = BoardCore.parse(pix, w, h, other.cal)
+                println("   with the calibration of ${File(System.getenv("CROSS")).name} (pitch %.1f): pitch %.2f arrows %d".format(other.cal.px, r2?.cal?.px ?: -1f, r2?.arrows?.size ?: -1))
+            }
+        }
         if (System.getenv("DUMP") != null) for (a in res.arrows) println("ARROW %.1f %.1f %d %d".format(a.headX, a.headY, a.dirC, a.dirR))
     }
 }

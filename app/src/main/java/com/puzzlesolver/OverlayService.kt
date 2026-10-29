@@ -53,19 +53,21 @@ class OverlayService : Service() {
         /** Red pixels on the board mean an arrow hit something. */
         private const val RED_HIT = 150
 
-        /** Two frames whose ink fingerprints differ by at most this many cells count as "the screen did not change". */
         private const val SETTLE_MS = 700L
+        private const val STUCK_MS = 120_000L
+
+        private val C_GREY = Color.parseColor("#455A64")
+        private val C_GREEN = Color.parseColor("#2E7D32")
+        private val C_RED = Color.parseColor("#C62828")
+        private val C_PURPLE = Color.parseColor("#6A1B9A")
+        private val C_ORANGE = Color.parseColor("#EF6C00")
+        private val C_DARK = Color.parseColor("#263238")
         private const val RECHECKS = 3
         private const val SMART_MS = 900L
         private const val MAX_ATTEMPTS = 3
     }
 
-    private class Scan(
-        val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int,
-        val button: Float = -1f, val corner: Boolean = false, val thumb: IntArray? = null,
-        /** every wide button found on the screen (y as a fraction of the height), top first */
-        val buttons: List<Float> = emptyList(),
-    )
+    private class Scan(val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int)
 
     private lateinit var wm: WindowManager
     private val main = Handler(Looper.getMainLooper())
@@ -84,6 +86,7 @@ class OverlayService : Service() {
     private lateinit var smartBtn: Button
     private lateinit var autoBtn: Button
     private lateinit var speedBtn: Button
+    private lateinit var gearBtn: Button
 
     private var cal: Calibration? = null
     private var captureBusy = false
@@ -99,21 +102,16 @@ class OverlayService : Service() {
     private var unsure = 0
     private var stillRetries = 0
     private var recheck = 0
-    private var lostPolls = 0
-    private var menuTaps = 0
-    private var backs = 0
-    private class Act(val thumb: IntArray, val x: Float, val y: Float)
-    private var lastAct: Act? = null
-    private val chain = ArrayList<Act>()
-    private var memTaps = 0
-    private val badYs = ArrayList<Float>()
     private var autoSnaps = 0
     private var stepNo = 0
-    private var cornerTaps = 0
     private var boardSeen = false
-    private var gameClass: String? = null
+    private var afterLevel = false
+    private var missCount = 0
+    private var noBoardSince = 0L
+    private var lostPolls = 0
     private var settleMs = SETTLE_MS
     private var levels = 0
+    private var gear: GearMenu? = null
     private var speedIdx = 1
     private var chunkSize = START_CHUNK
     private val tapped = HashSet<String>()
@@ -235,18 +233,19 @@ class OverlayService : Service() {
         }
     }
 
-    /** Where our own panel starts (fraction of the screen height), so it is never taken for a game button. */
-    private fun panelTopFraction(): Float {
+    /** Where our own panel is on screen, so its text is never taken for the game's. */
+    private fun panelRect(): android.graphics.Rect? {
         return try {
-            val p = panel ?: return 0.94f
+            val p = panel ?: return null
             val loc = IntArray(2)
             p.getLocationOnScreen(loc)
-            val h = resources.displayMetrics.heightPixels.toFloat()
-            ((loc[1] - 8) / h).coerceIn(0.5f, 0.94f)
+            android.graphics.Rect(loc[0], loc[1], loc[0] + p.width, loc[1] + p.height)
         } catch (e: Throwable) {
-            0.94f
+            null
         }
     }
+
+    private fun looksLikeBoard(r: ParseResult) = r.arrows.size >= 3 && r.arrows.size >= 2 * r.blockers.size
 
     private fun frameOrNull(bmp: Bitmap): BoardParser.Frame? =
         try {
@@ -313,32 +312,24 @@ class OverlayService : Service() {
                 return@captureClean
             }
             val calUsed = cal
-            val panelTop = panelTopFraction()
             Thread {
                 var res: ParseResult? = null
                 var solved: SolveResult? = null
-                val corner = try {
-                    BoardCore.cornerGlyph(f.pix, f.w, f.h)
-                } catch (e: Throwable) {
-                    false
-                }
-                val btns = try {
-                    BoardCore.findButtons(f.pix, f.w, f.h, panelTop).map { it.cy.toFloat() / f.h }
-                } catch (e: Throwable) {
-                    emptyList()
-                }
-                val btn = btns.firstOrNull() ?: -1f
                 try {
-                    res = BoardParser.parse(f, calUsed)
-                    solved = res?.let { Solver.solve(it) }
+                    // menus, ads and videos are mostly colour, a board is mostly thin lines: skip the slow parse for them
+                    if (f.inkFrac in 0.0008f..0.25f) {
+                        res = BoardParser.parse(f, calUsed)
+                        solved = res?.let { Solver.solve(it) }
+                    }
                 } catch (e: Throwable) {
                     res = null
                     solved = null
                 }
                 val r = res
                 main.post {
-                    if (r != null) cal = r.cal
-                    cb(Scan(r, solved, f.sig, f.red, btn, corner, f.thumb, btns))
+                    // only a result that reads like a real board may set the grid for the next scans
+                    if (r != null && looksLikeBoard(r)) cal = r.cal
+                    cb(Scan(r, solved, f.sig, f.red))
                 }
             }.start()
         }
@@ -348,7 +339,7 @@ class OverlayService : Service() {
 
     /** Saves a picture by itself when Auto gets into trouble (at most a few per run), for debugging. */
     private fun autoSnap(tag: String) {
-        if (autoSnaps >= 8 || Build.VERSION.SDK_INT < 29) return
+        if (autoSnaps >= 8 || Build.VERSION.SDK_INT < 29 || !Routine.autoSnap(this)) return
         autoSnaps++
         val bmp = grabBitmap() ?: return
         DebugLog.add(this, "saved picture ($tag)")
@@ -448,6 +439,14 @@ class OverlayService : Service() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    private fun paint(b: Button, color: Int) {
+        b.setTextColor(Color.WHITE)
+        b.background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(8).toFloat()
+        }
+    }
+
     private fun addPanelWindow() {
         val p = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -467,16 +466,27 @@ class OverlayService : Service() {
             isAllCaps = false
             minWidth = 0
             minimumWidth = 0
-            setPadding(dp(9), 0, dp(9), 0)
+            setPadding(dp(10), 0, dp(10), 0)
             setOnClickListener { onClick() }
         }
 
         smartBtn = btn("Smart") { toggleSmart() }
         autoBtn = btn("Auto") { toggleAuto() }
         speedBtn = btn("Speed 2") { cycleSpeed() }
-        val snap = btn("Snap") { snap() }
+        gearBtn = btn("\u2699") { gear?.toggle() }
         val close = btn("X") { stopSelf() }
-        for (b in listOf(smartBtn, autoBtn, speedBtn, snap, close)) row.addView(b)
+        paint(smartBtn, C_GREY)
+        paint(autoBtn, C_GREY)
+        paint(speedBtn, C_PURPLE)
+        paint(gearBtn, C_ORANGE)
+        paint(close, C_DARK)
+        for (b in listOf(smartBtn, autoBtn, speedBtn, gearBtn, close)) row.addView(b)
+
+        gear = GearMenu(this, wm, object : GearMenu.Host {
+            override fun testRoutine() = this@OverlayService.testRoutine()
+            override fun snapNow() = snap()
+            override fun logText() = DebugLog.tail(this@OverlayService, 3000) ?: "(empty)"
+        })
 
         p.addView(status)
         p.addView(row)
@@ -520,6 +530,7 @@ class OverlayService : Service() {
             smartOn = true
             lastSmartSig = null
             smartBtn.text = "Smart ON"
+            paint(smartBtn, C_GREEN)
             clearMarkers()
             status.text = "Smart scanning..."
             scheduleSmart(0L)
@@ -530,7 +541,10 @@ class OverlayService : Service() {
         smartOn = false
         smartBusy = false
         main.removeCallbacks(smartTick)
-        if (::smartBtn.isInitialized) smartBtn.text = "Smart"
+        if (::smartBtn.isInitialized) {
+            smartBtn.text = "Smart"
+            paint(smartBtn, C_GREY)
+        }
     }
 
     private fun scheduleSmart(ms: Long) {
@@ -583,12 +597,15 @@ class OverlayService : Service() {
     private fun startAuto() {
         if (AutoTapService.instance == null) {
             status.text = "Enable the auto-tap accessibility service first"
+            paint(autoBtn, C_RED)
             return
         }
         stopSmart()
+        gear?.hide()
         val id = ++session
         autoOn = true
         autoBtn.text = "Stop"
+        paint(autoBtn, C_GREEN)
         tapped.clear()
         attempts.clear()
         unsure = 0
@@ -599,18 +616,14 @@ class OverlayService : Service() {
         recheck = 0
         lostPolls = 0
         levels = 0
-        menuTaps = 0
-        backs = 0
-        cornerTaps = 0
+        missCount = 0
         boardSeen = false
-        gameClass = null
-        lastAct = null
-        chain.clear()
-        memTaps = 0
-        badYs.clear()
+        afterLevel = false
+        noBoardSince = 0L
         autoSnaps = 0
         stepNo = 0
-        DebugLog.add(this, "--- Auto started (speed ${speedIdx + 1})")
+        cal = null
+        DebugLog.add(this, "--- Auto started (speed ${speedIdx + 1}, ${Routine.load(this).size} routine steps)")
         status.text = "Auto: starting..."
         autoStep(id)
     }
@@ -620,14 +633,19 @@ class OverlayService : Service() {
         autoOn = false
         AutoTapService.instance?.clearQueue()
         tapped.clear()
-        if (::autoBtn.isInitialized) autoBtn.text = "Auto"
+        if (::autoBtn.isInitialized) {
+            autoBtn.text = "Auto"
+            paint(autoBtn, C_GREY)
+        }
         if (msg != null && ::status.isInitialized) status.text = msg
     }
 
+    /** Auto is stuck or something went wrong: stop, say why, and turn the Auto button red. */
     private fun autoFail(msg: String, at: Arrow? = null) {
         DebugLog.add(this, "FAIL: $msg")
         autoSnap("fail")
         stopAuto(msg)
+        paint(autoBtn, C_RED)
         clearMarkers()
         if (at != null) markerView?.items = listOf(Marker(0, at.headX, at.headY, -2))
     }
@@ -637,144 +655,160 @@ class OverlayService : Service() {
         speedBtn.text = "Speed ${speedIdx + 1}"
     }
 
+    // ---- the player's routine
+
+    /** Presses a word on screen: first through the accessibility labels, then by reading the screenshot. */
+    private fun pressWord(word: String, cb: (Boolean) -> Unit) {
+        val svc = AutoTapService.instance
+        if (svc != null && svc.pressText(word)) {
+            DebugLog.add(this, "pressed \"$word\" (label)")
+            cb(true)
+            return
+        }
+        captureClean { bmp, _ ->
+            if (bmp == null) {
+                cb(false)
+                return@captureClean
+            }
+            TextFinder.find(bmp, word, panelRect()) { box ->
+                if (box == null || svc == null) {
+                    cb(false)
+                } else {
+                    DebugLog.add(this, "pressed \"$word\" (read on screen at ${box.centerX()},${box.centerY()})")
+                    svc.tap(box.centerX().toFloat(), box.centerY().toFloat(), 0L)
+                    cb(true)
+                }
+            }
+        }
+    }
+
     /**
-     * One step of Auto. It never waits for "a still screen": the live picture is not reliably still.
-     *
-     * An arrow that was already tapped does not hurt the arrows behind it, even while it is
-     * still sliding, so the solution is tapped in order (arrows with an open path first), in chunks.
-     *   1. scan; check that everything tapped in the last chunk has left. Arrows that are still
-     *      there get a few more looks first (they may just be sliding); only then are they
-     *      counted as a miss (smaller chunk, tapped again) or, if red shows, Auto stops.
-     *   2. scan again shortly after; only the start of the plan that both scans agree on is used
-     *   3. tap that chunk, one tap at a time (the service queues them), counting only taps that went through
-     *   4. a moment after the last tap, repeat.
+     * Runs the player's steps one after the other. With [guarded], a Tap or Back step first checks that the
+     * game board is not on screen (it could hit an arrow); if the board is back, the routine ends early.
      */
+    private fun runRoutine(steps: List<Step>, alive: () -> Boolean, guarded: Boolean, done: () -> Unit) {
+        var i = 0
+        val dm = resources.displayMetrics
+        fun next() {
+            if (!alive()) return
+            if (i >= steps.size) {
+                done()
+                return
+            }
+            val st = steps[i++]
+            status.text = "Routine $i/${steps.size}: ${Routine.describe(st)}"
+            val svc = AutoTapService.instance
+            fun go() {
+                when (st.type) {
+                    'W' -> main.postDelayed({ next() }, st.secs * 1000L)
+                    'B' -> {
+                        svc?.back()
+                        main.postDelayed({ next() }, 900L)
+                    }
+                    'T' -> {
+                        svc?.tap(dm.widthPixels * st.x, dm.heightPixels * st.y, 0L)
+                        main.postDelayed({ next() }, 900L)
+                    }
+                    else -> pressWord(st.text) { found -> main.postDelayed({ next() }, if (found) 1200L else 150L) }
+                }
+            }
+            if (guarded && (st.type == 'T' || st.type == 'B')) {
+                scanBoard { sc ->
+                    if (!alive()) return@scanBoard
+                    val r = sc.res
+                    if (r != null && looksLikeBoard(r)) done() else go()
+                }
+            } else {
+                go()
+            }
+        }
+        next()
+    }
+
+    private fun testRoutine() {
+        val steps = Routine.load(this)
+        if (steps.isEmpty()) {
+            status.text = "The routine is empty: add steps in the gear menu"
+            return
+        }
+        stopSmart()
+        stopAuto(null)
+        val id = ++session
+        status.text = "Testing the routine..."
+        runRoutine(steps, { id == session }, false) { status.text = "Routine test finished" }
+    }
+
+    /** No board on screen: a level just ended, an ad is playing, something is loading. The routine decides what to do. */
+    private fun noBoard(id: Int, emptyBoard: Boolean) {
+        val now = SystemClock.uptimeMillis()
+        if (boardSeen) {
+            missCount++
+            if (!emptyBoard && missCount < 3) {
+                status.text = "Auto: lost the board for a moment..."
+                main.postDelayed({ autoStep(id) }, 700L)
+                return
+            }
+            // the level is finished
+            boardSeen = false
+            missCount = 0
+            levels++
+            afterLevel = true
+            noBoardSince = now
+            lostPolls = 0
+            tapped.clear()
+            attempts.clear()
+            recheck = 0
+            unsure = 0
+            chunkSize = START_CHUNK
+            cal = null
+            DebugLog.add(this, "level $levels finished")
+            val lim = Routine.levelLimit(this)
+            if (lim in 1..levels) {
+                stopAuto("Done: $levels levels")
+                clearMarkers()
+                return
+            }
+        }
+        if (noBoardSince == 0L) noBoardSince = now
+        if (now - noBoardSince > STUCK_MS) {
+            autoFail("Auto stopped: no board for 2 minutes (see the log on the start screen)")
+            return
+        }
+        val steps = Routine.load(this)
+        if (steps.isEmpty()) {
+            status.text = "Auto: no board. Add routine steps in the gear menu ($levels levels done)"
+            main.postDelayed({ autoStep(id) }, 1500L)
+            return
+        }
+        lostPolls++
+        if (lostPolls == 5) autoSnap("no_board")
+        runRoutine(steps, { id == session && autoOn }, true) {
+            main.postDelayed({ autoStep(id) }, 900L)
+        }
+    }
+
+    // ---- the arrows
+
     private fun autoStep(id: Int) {
         if (id != session || !autoOn) return
         scanBoard { s1 ->
             if (id != session || !autoOn) return@scanBoard
             val res1 = s1.res
             val solved1 = s1.solved
-            val cur = AutoTapService.curClass
-            // a real board has several readable arrows; a menu with a big button may parse as junk
-            val goodBoard = res1 != null && solved1 != null && res1.arrows.isNotEmpty() &&
-                (s1.button < 0f || (res1.arrows.size >= 3 && res1.arrows.size > res1.blockers.size))
-            val hasBoard = goodBoard
-            if (!hasBoard) {
-                // no board: level-complete / continue screens, a loading screen, or an ad
-                if (boardSeen) {
-                    boardSeen = false
-                    levels++
-                    badYs.clear(); lastAct = null; chain.clear()
-                    DebugLog.add(this, "level $levels finished")
-                }
-                lostPolls++
-                val svc = AutoTapService.instance
-                val thumb = s1.thumb
-                val gamePkg = gameClass?.substringBefore('/')
-                val curPkg = cur?.substringBefore('/')
-                val otherApp = gamePkg != null && curPkg != null && curPkg != gamePkg
-                val otherScreen = gameClass != null && cur != null && cur != gameClass
-
-                // judge the last press: nothing changed = not a real button; left the game = bad press
-                val la = lastAct
-                lastAct = null
-                if (la != null && thumb != null) {
-                    if (BoardCore.thumbDiff(la.thumb, thumb) < 3f) {
-                        badYs.add(la.y)
-                        ScreenMemory.learn(this, la.thumb, la.x, la.y, -1)
-                        DebugLog.add(this, "press at y=%.3f changed nothing, ignoring that spot".format(la.y))
-                        autoSnap("press_no_effect")
-                    } else if (otherApp) {
-                        ScreenMemory.learn(this, la.thumb, la.x, la.y, -3)
-                        DebugLog.add(this, "press at y=%.3f left the game, will not repeat it".format(la.y))
-                    } else {
-                        chain.add(la)
-                        if (chain.size > 4) chain.removeAt(0)
-                    }
-                }
-
-                // an ad can open Google Play (or another app): come back with the Back button
-                if (otherApp && backs < 5 && svc != null) {
-                    backs++
-                    DebugLog.add(this, "left the game ($curPkg): Back")
-                    status.text = "Auto: left the game, going back..."
-                    svc.back()
-                    main.postDelayed({ autoStep(id) }, 1300L)
-                    return@scanBoard
-                }
-
-                // 0. a screen we have already solved before: press what worked there
-                val known = if (thumb != null && !otherApp) ScreenMemory.best(this, thumb) else null
-                if (known != null && svc != null && memTaps < 6 && badYs.none { abs(it - known.y) < 0.03f }) {
-                    memTaps++
-                    lostPolls = 0
-                    lastAct = Act(thumb!!, known.x, known.y)
-                    status.text = "Auto: pressing a remembered button..."
-                    DebugLog.add(this, "known screen: pressing x=%.2f y=%.3f".format(known.x, known.y))
-                    svc.tap(resources.displayMetrics.widthPixels * known.x, resources.displayMetrics.heightPixels * known.y, 0L)
-                    main.postDelayed({ autoStep(id) }, 1300L)
-                    return@scanBoard
-                }
-
-                // 1. a menu button (Next Level / Continue ...): press the top one that has not failed before
-                val target = s1.buttons.firstOrNull { y -> badYs.none { abs(it - y) < 0.04f } }
-                if (target != null && menuTaps < 10 && svc != null) {
-                    menuTaps++
-                    lostPolls = 0
-                    tapped.clear(); attempts.clear(); recheck = 0; unsure = 0
-                    chunkSize = START_CHUNK
-                    cal = null
-                    if (thumb != null) lastAct = Act(thumb, 0.5f, target)
-                    status.text = "Level $levels done - pressing the button..."
-                    DebugLog.add(this, "menu button at y=%.3f (press %d)".format(target, menuTaps))
-                    svc.tap(resources.displayMetrics.widthPixels * 0.5f, resources.displayMetrics.heightPixels * target, 0L)
-                    main.postDelayed({ autoStep(id) }, 1400L)
-                    return@scanBoard
-                }
-
-                // 2. everything else is treated as an ad / loading screen. Ad checks run on every look.
-                if (lostPolls == 5) autoSnap("unknown_screen")
-                if (lostPolls > 80) {
-                    autoFail("Auto stopped: no board for a long time (see the picture in Gallery > PuzzleSolver)")
-                    return@scanBoard
-                }
-                var acted = false
-                if (svc != null && lostPolls >= 2 && svc.tryCloseAd()) {
-                    acted = true
-                    DebugLog.add(this, "pressed a Close/Skip button (ad)")
-                }
-                if (!acted && svc != null && lostPolls >= 3 && s1.corner && cornerTaps < 12) {
-                    // most ads put their skip ">>" or X in the top-right corner
-                    cornerTaps++
-                    acted = true
-                    DebugLog.add(this, "tapped the top-right corner (ad), try $cornerTaps")
-                    if (thumb != null) lastAct = Act(thumb, 0.935f, 0.043f)
-                    svc.tap(resources.displayMetrics.widthPixels * 0.935f, resources.displayMetrics.heightPixels * 0.043f, 0L)
-                }
-                status.text = when {
-                    acted -> "Auto: pressing the ad's skip button"
-                    otherScreen -> "Auto: ad is showing... ($lostPolls)"
-                    else -> "Auto: waiting for the board... ($lostPolls)"
-                }
-                main.postDelayed({ autoStep(id) }, if (acted) 1200L else 700L)
+            val isBoard = res1 != null && solved1 != null && res1.arrows.isNotEmpty() &&
+                (!afterLevel || looksLikeBoard(res1))
+            if (!isBoard || res1 == null || solved1 == null) {
+                noBoard(id, res1 != null && res1.arrows.isEmpty() && res1.blockers.isEmpty())
                 return@scanBoard
             }
-            if (gameClass == null && cur != null) gameClass = cur
-            if (chain.isNotEmpty()) {
-                // the board is back: every press since the level ended worked
-                for (a in chain) ScreenMemory.learn(this, a.thumb, a.x, a.y, 1)
-                DebugLog.add(this, "board is back, learned ${chain.size} press(es)")
-                chain.clear()
-            }
-            lostPolls = 0
-            menuTaps = 0
-            memTaps = 0
-            backs = 0
-            cornerTaps = 0
+            if (!boardSeen) DebugLog.add(this, "board found: ${res1.arrows.size} arrows, pitch %.1f".format(res1.cal.px))
             boardSeen = true
+            missCount = 0
+            afterLevel = false
+            noBoardSince = 0L
+            lostPolls = 0
+
             // few arrows: they leave fast, so the pauses can be shorter
-            if (res1 == null || solved1 == null) return@scanBoard
             settleMs = if (res1.arrows.size <= 40) 450L else SETTLE_MS
             stepNo++
             if (stepNo % 3 == 1 || res1.blockers.isNotEmpty()) {
@@ -881,6 +915,8 @@ class OverlayService : Service() {
         autoOn = false
         smartOn = false
         main.removeCallbacksAndMessages(null)
+        gear?.hide()
+        gear = null
         try {
             markerView?.let { wm.removeView(it) }
             watcher?.let { wm.removeView(it) }

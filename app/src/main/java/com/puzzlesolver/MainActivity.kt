@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -35,7 +36,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         col.addView(TextView(this).apply {
-            text = "Puzzle solver 0.9"
+            text = "Puzzle solver 0.6"
             textSize = 26f
             setTextColor(Color.BLACK)
         })
@@ -64,6 +65,20 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Find \"Puzzle solver auto-tap\" and turn it on", Toast.LENGTH_LONG).show()
         }
         button("3. Start Puzzle solver") { start() }
+        col.addView(TextView(this).apply {
+            text = "Your own words for the gear menu (comma separated, e.g. Install later, Resume):"
+            textSize = 13f
+            setPadding(0, pad / 2, 0, 0)
+        })
+        val words = EditText(this).apply {
+            setText(Routine.customWords(this@MainActivity).joinToString(", "))
+            setSingleLine(true)
+        }
+        col.addView(words)
+        button("Save words") {
+            Routine.saveCustomWords(this, words.text.toString())
+            Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
+        }
         button("Clear crash report and Auto log") {
             CrashLog.clear(this)
             DebugLog.clear(this)
@@ -87,12 +102,12 @@ class MainActivity : Activity() {
         info.text = crashText + logText + "Overlay permission: ${if (overlay) "OK" else "missing"}\n" +
             "Auto-tap service: ${if (acc) "on" else "off (needed for Auto; Smart works without it)"}\n\n" +
             "How to use: press Start, allow screen capture, open Amaze Go! and a level.\n" +
-            "Smart: keeps watching the board and shows a green dot on every arrow that can leave right now. " +
-            "Dots disappear while arrows are sliding and come back when the screen is still.\n" +
-            "Auto: taps the whole solution in order, in chunks, checking after each chunk that every " +
-            "tapped arrow left. If one hits something or will not move it stops and marks it red.\n" +
+            "Smart (green when on): keeps watching the board and shows a dot on every arrow that can leave right now.\n" +
+            "Auto (green while running, red when it got stuck): taps the whole solution in order, in chunks, and checks that every tapped arrow left.\n" +
             "Speed: how fast Auto taps (1 slow, 3 fast).\n" +
-            "Snap: saves a picture of what the app sees (Gallery > PuzzleSolver) for debugging."
+            "Gear: build your routine (press a word such as Continue or Next Level, tap a spot, wait, Back). " +
+            "The routine runs again and again whenever the board is gone while Auto is on. Also: test the routine, " +
+            "stop after N levels, Snap, the Auto log."
     }
 
     private fun start() {
