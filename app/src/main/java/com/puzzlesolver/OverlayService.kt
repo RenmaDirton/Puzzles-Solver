@@ -33,6 +33,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class OverlayService : Service() {
@@ -55,11 +56,16 @@ class OverlayService : Service() {
         /** Two frames whose ink fingerprints differ by at most this many cells count as "the screen did not change". */
         private const val SETTLE_MS = 700L
         private const val RECHECKS = 3
-        private const val SMART_MS = 1500L
+        private const val SMART_MS = 900L
         private const val MAX_ATTEMPTS = 3
     }
 
-    private class Scan(val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int, val button: Float = -1f, val corner: Boolean = false)
+    private class Scan(
+        val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int,
+        val button: Float = -1f, val corner: Boolean = false, val thumb: IntArray? = null,
+        /** every wide button found on the screen (y as a fraction of the height), top first */
+        val buttons: List<Float> = emptyList(),
+    )
 
     private lateinit var wm: WindowManager
     private val main = Handler(Looper.getMainLooper())
@@ -96,6 +102,13 @@ class OverlayService : Service() {
     private var lostPolls = 0
     private var menuTaps = 0
     private var backs = 0
+    private class Act(val thumb: IntArray, val x: Float, val y: Float)
+    private var lastAct: Act? = null
+    private val chain = ArrayList<Act>()
+    private var memTaps = 0
+    private val badYs = ArrayList<Float>()
+    private var autoSnaps = 0
+    private var stepNo = 0
     private var cornerTaps = 0
     private var boardSeen = false
     private var gameClass: String? = null
@@ -222,6 +235,19 @@ class OverlayService : Service() {
         }
     }
 
+    /** Where our own panel starts (fraction of the screen height), so it is never taken for a game button. */
+    private fun panelTopFraction(): Float {
+        return try {
+            val p = panel ?: return 0.94f
+            val loc = IntArray(2)
+            p.getLocationOnScreen(loc)
+            val h = resources.displayMetrics.heightPixels.toFloat()
+            ((loc[1] - 8) / h).coerceIn(0.5f, 0.94f)
+        } catch (e: Throwable) {
+            0.94f
+        }
+    }
+
     private fun frameOrNull(bmp: Bitmap): BoardParser.Frame? =
         try {
             BoardParser.frameOf(bmp)
@@ -287,6 +313,7 @@ class OverlayService : Service() {
                 return@captureClean
             }
             val calUsed = cal
+            val panelTop = panelTopFraction()
             Thread {
                 var res: ParseResult? = null
                 var solved: SolveResult? = null
@@ -295,11 +322,12 @@ class OverlayService : Service() {
                 } catch (e: Throwable) {
                     false
                 }
-                val btn = try {
-                    BoardCore.findButtons(f.pix, f.w, f.h).firstOrNull()?.let { it.cy.toFloat() / f.h } ?: -1f
+                val btns = try {
+                    BoardCore.findButtons(f.pix, f.w, f.h, panelTop).map { it.cy.toFloat() / f.h }
                 } catch (e: Throwable) {
-                    -1f
+                    emptyList()
                 }
+                val btn = btns.firstOrNull() ?: -1f
                 try {
                     res = BoardParser.parse(f, calUsed)
                     solved = res?.let { Solver.solve(it) }
@@ -310,13 +338,33 @@ class OverlayService : Service() {
                 val r = res
                 main.post {
                     if (r != null) cal = r.cal
-                    cb(Scan(r, solved, f.sig, f.red, btn, corner))
+                    cb(Scan(r, solved, f.sig, f.red, btn, corner, f.thumb, btns))
                 }
             }.start()
         }
     }
 
     // ------------------------------------------------------------------ snapshot
+
+    /** Saves a picture by itself when Auto gets into trouble (at most a few per run), for debugging. */
+    private fun autoSnap(tag: String) {
+        if (autoSnaps >= 8 || Build.VERSION.SDK_INT < 29) return
+        autoSnaps++
+        val bmp = grabBitmap() ?: return
+        DebugLog.add(this, "saved picture ($tag)")
+        Thread {
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, "auto_${tag}_${System.currentTimeMillis()}.png")
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PuzzleSolver")
+                }
+                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) contentResolver.openOutputStream(uri)?.use { out -> bmp.compress(Bitmap.CompressFormat.PNG, 90, out) }
+            } catch (_: Throwable) {
+            }
+        }.start()
+    }
 
     /** Saves what the app sees (without its own markers) to Pictures/PuzzleSolver, so it can be sent for debugging. */
     private fun snap() {
@@ -493,7 +541,7 @@ class OverlayService : Service() {
     private fun onUserTouch() {
         if (!smartOn || autoOn) return
         followUps = 3
-        scheduleSmart(500L)
+        scheduleSmart(350L)
     }
 
     private fun smartStep() {
@@ -519,7 +567,7 @@ class OverlayService : Service() {
                 }
                 if (followUps > 0) {
                     followUps--
-                    next = 900L
+                    next = 500L
                 }
             }
             scheduleSmart(next)
@@ -556,6 +604,13 @@ class OverlayService : Service() {
         cornerTaps = 0
         boardSeen = false
         gameClass = null
+        lastAct = null
+        chain.clear()
+        memTaps = 0
+        badYs.clear()
+        autoSnaps = 0
+        stepNo = 0
+        DebugLog.add(this, "--- Auto started (speed ${speedIdx + 1})")
         status.text = "Auto: starting..."
         autoStep(id)
     }
@@ -570,6 +625,8 @@ class OverlayService : Service() {
     }
 
     private fun autoFail(msg: String, at: Arrow? = null) {
+        DebugLog.add(this, "FAIL: $msg")
+        autoSnap("fail")
         stopAuto(msg)
         clearMarkers()
         if (at != null) markerView?.items = listOf(Marker(0, at.headX, at.headY, -2))
@@ -599,68 +656,131 @@ class OverlayService : Service() {
             val res1 = s1.res
             val solved1 = s1.solved
             val cur = AutoTapService.curClass
-            val hasBoard = s1.button < 0f && res1 != null && solved1 != null && res1.arrows.isNotEmpty()
+            // a real board has several readable arrows; a menu with a big button may parse as junk
+            val goodBoard = res1 != null && solved1 != null && res1.arrows.isNotEmpty() &&
+                (s1.button < 0f || (res1.arrows.size >= 3 && res1.arrows.size > res1.blockers.size))
+            val hasBoard = goodBoard
             if (!hasBoard) {
                 // no board: level-complete / continue screens, a loading screen, or an ad
-                if (boardSeen) { boardSeen = false; levels++ }
+                if (boardSeen) {
+                    boardSeen = false
+                    levels++
+                    badYs.clear(); lastAct = null; chain.clear()
+                    DebugLog.add(this, "level $levels finished")
+                }
                 lostPolls++
-                // an ad is a different screen (activity) than the game; menus belong to the game
-                val inAd = gameClass != null && cur != null && cur != gameClass
-                val maxTaps = if (gameClass != null && cur != null) 8 else 3
                 val svc = AutoTapService.instance
-                if (!inAd && s1.button >= 0f && menuTaps < maxTaps && svc != null) {
-                    menuTaps++
-                    lostPolls = 0
-                    tapped.clear(); attempts.clear(); recheck = 0; unsure = 0
-                    chunkSize = START_CHUNK
-                    cal = null
-                    status.text = "Level $levels done - pressing the button..."
-                    svc.tap(resources.displayMetrics.widthPixels * 0.5f, resources.displayMetrics.heightPixels * s1.button, 0L)
-                    main.postDelayed({ autoStep(id) }, 1400L)
-                    return@scanBoard
-                }
-                if (lostPolls > (if (inAd) 70 else 25) + (if (cur != null && gameClass != null && cur.substringBefore('/') != gameClass!!.substringBefore('/')) 20 else 0)) {
-                    if (res1 != null && res1.arrows.isEmpty() && res1.blockers.isEmpty()) stopAuto("Board clear")
-                    else autoFail("Auto stopped: no board for a while (press Snap and send me the picture)")
-                    clearMarkers()
-                    return@scanBoard
-                }
-                // an ad can open Google Play (or another app): come back with the Back button
+                val thumb = s1.thumb
                 val gamePkg = gameClass?.substringBefore('/')
                 val curPkg = cur?.substringBefore('/')
-                if (gamePkg != null && curPkg != null && curPkg != gamePkg && backs < 4 && svc != null) {
+                val otherApp = gamePkg != null && curPkg != null && curPkg != gamePkg
+                val otherScreen = gameClass != null && cur != null && cur != gameClass
+
+                // judge the last press: nothing changed = not a real button; left the game = bad press
+                val la = lastAct
+                lastAct = null
+                if (la != null && thumb != null) {
+                    if (BoardCore.thumbDiff(la.thumb, thumb) < 3f) {
+                        badYs.add(la.y)
+                        ScreenMemory.learn(this, la.thumb, la.x, la.y, -1)
+                        DebugLog.add(this, "press at y=%.3f changed nothing, ignoring that spot".format(la.y))
+                        autoSnap("press_no_effect")
+                    } else if (otherApp) {
+                        ScreenMemory.learn(this, la.thumb, la.x, la.y, -3)
+                        DebugLog.add(this, "press at y=%.3f left the game, will not repeat it".format(la.y))
+                    } else {
+                        chain.add(la)
+                        if (chain.size > 4) chain.removeAt(0)
+                    }
+                }
+
+                // an ad can open Google Play (or another app): come back with the Back button
+                if (otherApp && backs < 5 && svc != null) {
                     backs++
+                    DebugLog.add(this, "left the game ($curPkg): Back")
                     status.text = "Auto: left the game, going back..."
                     svc.back()
                     main.postDelayed({ autoStep(id) }, 1300L)
                     return@scanBoard
                 }
-                var closed = lostPolls >= 2 && (inAd || lostPolls >= 8) && svc?.tryCloseAd() == true
-                var cornered = false
-                if (!closed && inAd && lostPolls >= 3 && s1.corner && cornerTaps < 10 && svc != null) {
-                    // most ads put their skip ">>" or X in the top-right corner (it may open Google Play first; Back handles that)
+
+                // 0. a screen we have already solved before: press what worked there
+                val known = if (thumb != null && !otherApp) ScreenMemory.best(this, thumb) else null
+                if (known != null && svc != null && memTaps < 6 && badYs.none { abs(it - known.y) < 0.03f }) {
+                    memTaps++
+                    lostPolls = 0
+                    lastAct = Act(thumb!!, known.x, known.y)
+                    status.text = "Auto: pressing a remembered button..."
+                    DebugLog.add(this, "known screen: pressing x=%.2f y=%.3f".format(known.x, known.y))
+                    svc.tap(resources.displayMetrics.widthPixels * known.x, resources.displayMetrics.heightPixels * known.y, 0L)
+                    main.postDelayed({ autoStep(id) }, 1300L)
+                    return@scanBoard
+                }
+
+                // 1. a menu button (Next Level / Continue ...): press the top one that has not failed before
+                val target = s1.buttons.firstOrNull { y -> badYs.none { abs(it - y) < 0.04f } }
+                if (target != null && menuTaps < 10 && svc != null) {
+                    menuTaps++
+                    lostPolls = 0
+                    tapped.clear(); attempts.clear(); recheck = 0; unsure = 0
+                    chunkSize = START_CHUNK
+                    cal = null
+                    if (thumb != null) lastAct = Act(thumb, 0.5f, target)
+                    status.text = "Level $levels done - pressing the button..."
+                    DebugLog.add(this, "menu button at y=%.3f (press %d)".format(target, menuTaps))
+                    svc.tap(resources.displayMetrics.widthPixels * 0.5f, resources.displayMetrics.heightPixels * target, 0L)
+                    main.postDelayed({ autoStep(id) }, 1400L)
+                    return@scanBoard
+                }
+
+                // 2. everything else is treated as an ad / loading screen. Ad checks run on every look.
+                if (lostPolls == 5) autoSnap("unknown_screen")
+                if (lostPolls > 80) {
+                    autoFail("Auto stopped: no board for a long time (see the picture in Gallery > PuzzleSolver)")
+                    return@scanBoard
+                }
+                var acted = false
+                if (svc != null && lostPolls >= 2 && svc.tryCloseAd()) {
+                    acted = true
+                    DebugLog.add(this, "pressed a Close/Skip button (ad)")
+                }
+                if (!acted && svc != null && lostPolls >= 3 && s1.corner && cornerTaps < 12) {
+                    // most ads put their skip ">>" or X in the top-right corner
                     cornerTaps++
-                    cornered = true
+                    acted = true
+                    DebugLog.add(this, "tapped the top-right corner (ad), try $cornerTaps")
+                    if (thumb != null) lastAct = Act(thumb, 0.935f, 0.043f)
                     svc.tap(resources.displayMetrics.widthPixels * 0.935f, resources.displayMetrics.heightPixels * 0.043f, 0L)
                 }
-                if (cornered) closed = true
                 status.text = when {
-                    closed -> "Auto: pressing the ad's skip button"
-                    inAd -> "Auto: ad is showing... ($lostPolls)"
+                    acted -> "Auto: pressing the ad's skip button"
+                    otherScreen -> "Auto: ad is showing... ($lostPolls)"
                     else -> "Auto: waiting for the board... ($lostPolls)"
                 }
-                main.postDelayed({ autoStep(id) }, if (closed) 1000L else if (inAd) 1000L else 600L)
+                main.postDelayed({ autoStep(id) }, if (acted) 1200L else 700L)
                 return@scanBoard
             }
             if (gameClass == null && cur != null) gameClass = cur
+            if (chain.isNotEmpty()) {
+                // the board is back: every press since the level ended worked
+                for (a in chain) ScreenMemory.learn(this, a.thumb, a.x, a.y, 1)
+                DebugLog.add(this, "board is back, learned ${chain.size} press(es)")
+                chain.clear()
+            }
             lostPolls = 0
             menuTaps = 0
+            memTaps = 0
             backs = 0
             cornerTaps = 0
             boardSeen = true
             // few arrows: they leave fast, so the pauses can be shorter
             if (res1 == null || solved1 == null) return@scanBoard
             settleMs = if (res1.arrows.size <= 40) 450L else SETTLE_MS
+            stepNo++
+            if (stepNo % 3 == 1 || res1.blockers.isNotEmpty()) {
+                DebugLog.add(this, "step $stepNo: ${res1.arrows.size} arrows, ${res1.blockers.size} unread, pitch %.1f, chunk $chunkSize, free ${res1.arrows.count { it.round == 0 }}".format(res1.cal.px))
+            }
+            if (res1.blockers.size > res1.arrows.size / 3 + 2) autoSnap("unread_shapes")
             if (attempts.isEmpty() && tapped.isEmpty() && res1.arrows.size <= 30) chunkSize = 30
 
             // did the arrows we tapped last time leave?

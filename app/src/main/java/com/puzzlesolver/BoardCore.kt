@@ -8,7 +8,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** Position of the dot lattice on the screen, in pixels: point (c, r) is at (x0 + c*px, y0 + r*py). */
-class Calibration(val x0: Float, val y0: Float, val px: Float, val py: Float)
+class Calibration(val x0: Float, val y0: Float, val px: Float, val py: Float, val exp: Float = 1f)
 
 /** One arrow (snake). Cells are lattice point ids (row * cols + col). */
 class Arrow(
@@ -76,7 +76,9 @@ object BoardCore {
     fun parse(pix: IntArray, w: Int, h: Int, cached: Calibration?): ParseResult? {
         val m = masks(pix, w, h)
         var cal: Calibration? = cached
-        if (cal != null && explained(m.ink, w, h, cal) < 0.90f) cal = null
+        // a cached lattice stays valid while it explains the ink about as well as when it was fitted
+        // (sparse boards with big arrowheads never reach 0.9, so a fixed 0.9 refitted on every scan)
+        if (cal != null && explained(m.ink, w, h, cal) < min(0.90f, cal.exp - 0.08f)) cal = null
         val fresh = cal == null
         val first = cal ?: pickCalibration(m, w, h) ?: return null
         var best = parseWith(m.ink, w, h, first)
@@ -119,7 +121,7 @@ object BoardCore {
                 }
             }
         }
-        return cur
+        return Calibration(cur.x0, cur.y0, cur.px, cur.py, curExp)
     }
 
     private fun quality(r: ParseResult) = r.arrows.size - 2 * r.blockers.size
@@ -724,11 +726,11 @@ object BoardCore {
      * a row is part of a button when the fill 20% and 80% across is the same colour, and going
      * outwards from there the colour changes at about 8-19% / 81-92% of the width.
      */
-    fun findButtons(pix: IntArray, w: Int, h: Int): List<Button> {
+    fun findButtons(pix: IntArray, w: Int, h: Int, yMaxFrac: Float = 0.94f): List<Button> {
         fun d(a: Int, b: Int) =
             abs(((a shr 16) and 255) - ((b shr 16) and 255)) + abs(((a shr 8) and 255) - ((b shr 8) and 255)) + abs((a and 255) - (b and 255))
         val ya = (h * 0.50f).toInt()
-        val yb = (h * 0.94f).toInt()
+        val yb = (h * min(0.94f, yMaxFrac)).toInt()
         val xl = (w * 0.20f).toInt()
         val xr = (w * 0.80f).toInt()
         val rowContrast = IntArray(h)
@@ -812,5 +814,39 @@ object BoardCore {
         }
         val f = diff.toFloat() / tot
         return f in 0.006f..0.5f
+    }
+
+    // ------------------------------------------------------------------ whole-screen thumbnail
+
+    const val THUMB_W = 16
+    const val THUMB_H = 32
+
+    /** Tiny brightness picture of the whole screen: tells whether the screen changed at all. */
+    fun thumb(pix: IntArray, w: Int, h: Int): IntArray {
+        val out = IntArray(THUMB_W * THUMB_H)
+        for (ty in 0 until THUMB_H) {
+            for (tx in 0 until THUMB_W) {
+                var sum = 0
+                var n = 0
+                for (dy in 0..2) {
+                    for (dx in 0..2) {
+                        val x = ((tx + (dx + 0.5f) / 3f) / THUMB_W * w).toInt().coerceIn(0, w - 1)
+                        val y = ((ty + (dy + 0.5f) / 3f) / THUMB_H * h).toInt().coerceIn(0, h - 1)
+                        val p = pix[y * w + x]
+                        sum += (((p shr 16) and 255) * 3 + ((p shr 8) and 255) * 6 + (p and 255)) / 10
+                        n++
+                    }
+                }
+                out[ty * THUMB_W + tx] = sum / n
+            }
+        }
+        return out
+    }
+
+    /** Mean brightness difference of two thumbnails (0 = same screen; > 5 = something changed). */
+    fun thumbDiff(a: IntArray, b: IntArray): Float {
+        var d = 0L
+        for (i in a.indices) d += abs(a[i] - b[i])
+        return d.toFloat() / a.size
     }
 }

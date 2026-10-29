@@ -1,4 +1,4 @@
-# Puzzle solver 0.8
+# Puzzle solver 0.9
 
 Floating overlay that solves **arrow mazes** (built and tested on screenshots from "Amaze Go!").
 Target: Android 8.0+ (minSdk 26), arm64-v8a only.
@@ -60,7 +60,7 @@ screenshots on a normal JVM:
 (Screenshots taken while the overlay's green dots are showing are cleaned up by the test first.)
 `tools/reference/` has the Python version of the same logic plus a sliding-arrows simulator.
 
-## Known limits of 0.8
+## Known limits of 0.9
 
 - The Android layer (overlay, capture, auto-tap) has not been compiled or run on a device by me. The board reader and solver are compiled and tested on 5 real screenshots.
 - The board is looked for between 19% and 87% of the screen height; other layouts may need tuning.
@@ -78,3 +78,10 @@ screenshots on a normal JVM:
 ## 0.8 notes
 - Boards with big cells (easy levels, up to 170 px) and tiny cells (level 135, 15 px) are read: the grid search sizes its filter from the line thickness, thick lines are reduced to a sharp centre line, a doubled grid is detected and halved, and arrow heads are judged relative to the line thickness of the board instead of fixed pixel sizes. tools/jvmtest + tools/synth (gen.py, score.py) draw small boards with known answers and score the parser.
 - Ads: if an ad opens another app (Google Play), Auto presses Back (at most 4 times); in an ad it presses the top-right corner (the usual ">>" or X) when it looks like a button.
+
+## 0.9 notes (smarter, not just more rules)
+- Every press outside the board is checked: if the screen did not change, that spot is never pressed again (no more endless pressing of a button that is not there). If it threw the game out of the foreground, it is marked bad.
+- ScreenMemory: the app remembers screens (tiny pictures) where a press was followed by the board coming back, and presses that first next time (needs 2 successes). Stored in the app's private files, survives updates.
+- A board is only accepted as a board when it reads as one (>=3 arrows and more arrows than unreadable shapes) when a big button is on screen; our own panel is excluded from button detection.
+- Calibration remembers how well the grid explained the ink when it was fitted, so sparse boards with big arrows no longer refit on every scan (scan 300 ms -> 30 ms).
+- Auto log (start screen) and automatic pictures (Gallery > PuzzleSolver, auto_*.png) are written whenever Auto gets stuck.

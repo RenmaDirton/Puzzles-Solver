@@ -58,6 +58,11 @@ fun main(args: Array<String>) {
                     batch.size, mo[0], mo[1], ms,
                 ) + " [old %d adaptive %d disagree %d]".format(BoardCore.dbgOld, BoardCore.dbgAdaptive, BoardCore.dbgDisagree),
         )
+        if (System.getenv("CACHED") != null) {
+            val t1 = System.nanoTime()
+            val again = BoardCore.parse(pix, w, h, res.cal)
+            println("   cached parse: %d ms, pitch %.2f, arrows %d".format((System.nanoTime() - t1) / 1_000_000, again?.cal?.px ?: -1f, again?.arrows?.size ?: -1))
+        }
         if (System.getenv("DUMP") != null) for (a in res.arrows) println("ARROW %.1f %.1f %d %d".format(a.headX, a.headY, a.dirC, a.dirR))
     }
 }

@@ -35,7 +35,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         col.addView(TextView(this).apply {
-            text = "Puzzle solver 0.8"
+            text = "Puzzle solver 0.9"
             textSize = 26f
             setTextColor(Color.BLACK)
         })
@@ -64,8 +64,9 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Find \"Puzzle solver auto-tap\" and turn it on", Toast.LENGTH_LONG).show()
         }
         button("3. Start Puzzle solver") { start() }
-        button("Clear crash report") {
+        button("Clear crash report and Auto log") {
             CrashLog.clear(this)
+            DebugLog.clear(this)
             onResume()
         }
         button("Stop") {
@@ -81,7 +82,9 @@ class MainActivity : Activity() {
         val acc = AutoTapService.instance != null
         val crash = CrashLog.read(this)
         val crashText = if (crash != null) "LAST CRASH (send me this):\n" + crash.take(1800) + "\n\n" else ""
-        info.text = crashText + "Overlay permission: ${if (overlay) "OK" else "missing"}\n" +
+        val log = DebugLog.tail(this, 2500)
+        val logText = if (log != null) "AUTO LOG (send me a screenshot of this when Auto goes wrong):\n" + log + "\n\n" else ""
+        info.text = crashText + logText + "Overlay permission: ${if (overlay) "OK" else "missing"}\n" +
             "Auto-tap service: ${if (acc) "on" else "off (needed for Auto; Smart works without it)"}\n\n" +
             "How to use: press Start, allow screen capture, open Amaze Go! and a level.\n" +
             "Smart: keeps watching the board and shows a green dot on every arrow that can leave right now. " +
