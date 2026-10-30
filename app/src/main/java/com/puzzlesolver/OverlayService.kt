@@ -67,7 +67,7 @@ class OverlayService : Service() {
         private const val MAX_ATTEMPTS = 3
     }
 
-    private class Scan(val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int)
+    private class Scan(val res: ParseResult?, val solved: SolveResult?, val sig: LongArray?, val red: Int, val lives: Int = 0)
 
     private lateinit var wm: WindowManager
     private val main = Handler(Looper.getMainLooper())
@@ -99,6 +99,8 @@ class OverlayService : Service() {
     private var followUps = 0
     private var lastSmartSig: LongArray? = null
     private var redSeen = false
+    /** Hearts seen on the last board scan; a drop means a tapped arrow hit something (works for any arrow colour). */
+    private var lastLives = 0
     private var unsure = 0
     private var stillRetries = 0
     private var recheck = 0
@@ -329,7 +331,7 @@ class OverlayService : Service() {
                 main.post {
                     // only a result that reads like a real board may set the grid for the next scans
                     if (r != null && looksLikeBoard(r)) cal = r.cal
-                    cb(Scan(r, solved, f.sig, f.red))
+                    cb(Scan(r, solved, f.sig, f.red, f.lives))
                 }
             }.start()
         }
@@ -612,6 +614,7 @@ class OverlayService : Service() {
         stillRetries = 0
         chunkSize = START_CHUNK
         redSeen = false
+        lastLives = 0
         clearMarkers()
         recheck = 0
         lostPolls = 0
@@ -826,9 +829,12 @@ class OverlayService : Service() {
                 return@scanBoard
             }
             recheck = 0
+            val hearts = s1.lives
+            val lost = lastLives > 0 && hearts in 0 until lastLives
+            if (hearts > lastLives) lastLives = hearts
             if (still.isNotEmpty()) {
-                if (s1.red >= RED_HIT) {
-                    autoFail("Auto stopped: a tapped arrow hit something (red)", still[0])
+                if (lost) {
+                    autoFail("Auto stopped: a tapped arrow hit something (lost a life)", still[0])
                     return@scanBoard
                 }
                 val worst = still.maxByOrNull { attempts[key(it)] ?: 0 }!!

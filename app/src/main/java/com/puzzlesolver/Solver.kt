@@ -44,8 +44,10 @@ object Solver {
         var remaining = arrows.size
         val rays = Array(arrows.size) { rayCells(arrows[it], nc, nr) }
 
+        val sinks = res.sinks
         fun isFree(i: Int): Boolean {
             for (id in rays[i]) {
+                if (id < sinks.size && sinks[id]) return true // reaches a purple cube: it disappears
                 val o = owner[id]
                 if (o == -2) return false
                 if (o >= 0 && o != i && alive[o]) return false

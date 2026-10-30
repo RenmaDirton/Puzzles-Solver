@@ -56,7 +56,7 @@ fun main(args: Array<String>) {
                     res.cal.px, res.cal.py, res.cal.x0, res.cal.y0, res.cols, res.rows, res.arrows.size,
                     res.blockers.size, solved.rounds, solved.stuck, res.arrows.count { it.round == 0 },
                     batch.size, mo[0], mo[1], ms,
-                ) + " [old %d adaptive %d disagree %d]".format(BoardCore.dbgOld, BoardCore.dbgAdaptive, BoardCore.dbgDisagree),
+                ) + " [old %d adaptive %d disagree %d] cubes %d lives %d".format(BoardCore.dbgOld, BoardCore.dbgAdaptive, BoardCore.dbgDisagree, res.sinks.count { it }, BoardCore.lives(pix, w, h)),
         )
         if (System.getenv("CACHED") != null) {
             val t1 = System.nanoTime()
@@ -73,6 +73,7 @@ fun main(args: Array<String>) {
                 println("   with the calibration of ${File(System.getenv("CROSS")).name} (pitch %.1f): pitch %.2f arrows %d".format(other.cal.px, r2?.cal?.px ?: -1f, r2?.arrows?.size ?: -1))
             }
         }
+        if (System.getenv("BLK") != null) for (b in res.blockers) println("BLOCKER cells=%d first at x=%.0f y=%.0f last x=%.0f y=%.0f".format(b.size, res.cal.x0 + (b[0] % res.cols) * res.cal.px, res.cal.y0 + (b[0] / res.cols) * res.cal.py, res.cal.x0 + (b.last() % res.cols) * res.cal.px, res.cal.y0 + (b.last() / res.cols) * res.cal.py))
         if (System.getenv("DUMP") != null) for (a in res.arrows) println("ARROW %.1f %.1f %d %d".format(a.headX, a.headY, a.dirC, a.dirR))
     }
 }

@@ -25,3 +25,9 @@ tools/jvmtest: CoreTest.kt (boards), ButtonTest.kt (ink share); tools/synth: gen
 ## Build
 GitHub Actions workflow in .github/workflows/build.yml (Gradle, Java 17, Android platform 34). Fixed debug key in app/debug.keystore so updates install over each other.
 Needs internet for Gradle (the text recognition library comes from Google's Maven repository).
+
+## Changes in this build (0.6, code 12)
+- Arrow colours: ink detection is now relative to the background, so grey, bright red, green, pink and dim arrows are read, in light and dark themes.
+- Purple space cubes: a path that reaches a cube counts as clear (the arrow disappears there).
+- Hits are detected by the hearts at the top left dropping, not by red pixels (pink arrows look red). A lost life stops Auto and turns the button red.
+- Few small arrows left: the grid found at the start of the level is kept, so tiny boards are still read.

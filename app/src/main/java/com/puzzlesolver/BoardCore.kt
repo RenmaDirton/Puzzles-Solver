@@ -35,6 +35,8 @@ class ParseResult(
     val cols: Int,
     val rows: Int,
     val cal: Calibration,
+    /** Lattice points inside a purple cube (an arrow that reaches one leaves the board). */
+    val sinks: BooleanArray = BooleanArray(0),
 )
 
 /**
@@ -57,10 +59,11 @@ object BoardCore {
 
     private const val RIGHT = 1
     private const val DOWN = 2
+    private const val INK_D = 100
     private const val LEFT = 4
     private const val UP = 8
 
-    class Masks(val ink: BooleanArray, val struct: BooleanArray, val win: Int = 25)
+    class Masks(val ink: BooleanArray, val struct: BooleanArray, val win: Int = 25, val purple: BooleanArray)
 
     const val PMIN = 10f
     const val PMAX = 170f
@@ -82,12 +85,12 @@ object BoardCore {
         if (cal != null && explained(m.ink, w, h, cal) < cal.exp * 0.6f) cal = null
         val fresh = cal == null
         val first = cal ?: pickCalibration(m, w, h) ?: return null
-        var best = parseWith(m.ink, w, h, first)
+        var best = parseWith(m.ink, m.purple, w, h, first)
         if (!fresh && quality(best) < 0) {
             // the stored lattice reads badly (a different board?): fit a new one and keep whichever reads better
             val c = pickCalibration(m, w, h)
             if (c != null) {
-                val r = parseWith(m.ink, w, h, c)
+                val r = parseWith(m.ink, m.purple, w, h, c)
                 if (quality(r) > quality(best)) best = r
             }
         }
@@ -96,7 +99,7 @@ object BoardCore {
             for (p in floatArrayOf(first.px * 2f, first.px / 2f, first.px * 3f)) {
                 if (p < PMIN || p > PMAX) continue
                 val c = calibrateAt(m.struct, w, h, p, m.win) ?: continue
-                val r = parseWith(m.ink, w, h, c)
+                val r = parseWith(m.ink, m.purple, w, h, c)
                 if (quality(r) > quality(best)) best = r
             }
         }
@@ -137,6 +140,13 @@ object BoardCore {
 
     // ------------------------------------------------------------------ pixels
 
+    /** Purple "space" cubes: arrows that touch one disappear, so a cube is an exit. Fill and light border colours. */
+    private fun isPurple(r: Int, g: Int, b: Int): Boolean {
+        val fill = r in 40..135 && g < 88 && b >= 100 && b - g >= 50 && b > r
+        val border = r >= 150 && g in 85..160 && b >= 190 && b - g >= 55 && r - g >= 35
+        return fill || border
+    }
+
     fun masks(pix: IntArray, w: Int, h: Int): Masks {
         val bg = pix[(h / 2) * w + 8]
         val bgR = (bg shr 16) and 0xFF
@@ -144,6 +154,8 @@ object BoardCore {
         val bgB = bg and 0xFF
         val ink = BooleanArray(w * h)
         val struct = BooleanArray(w * h)
+        val purple = BooleanArray(w * h)
+        var anyPurple = false
         for (i in pix.indices) {
             val p = pix[i]
             val r = (p shr 16) and 0xFF
@@ -151,10 +163,33 @@ object BoardCore {
             val b = p and 0xFF
             val d = abs(r - bgR) + abs(g - bgG) + abs(b - bgB)
             val rb = r - b
-            ink[i] = d > 165 || (rb >= 78 && d >= 60)
+            // 100 (not 165): dim arrow colours (grey-blue on the light theme, dark green on the dark theme) must count;
+            // the faint dots of cleared cells stay far below (about 30-60)
+            ink[i] = d >= INK_D || (rb >= 78 && d >= 60)
             struct[i] = d >= 60 || (rb >= 78 && d >= 45)
+            if (d >= 60 && isPurple(r, g, b)) {
+                purple[i] = true
+                anyPurple = true
+            }
         }
-        return Masks(ink, struct, strokeWindow(ink, w, h))
+        if (anyPurple) {
+            // cubes are not ink: take them (and a margin around them) out of the line masks
+            val y0 = (h * 0.10f).toInt()
+            val y1 = (h * 0.95f).toInt()
+            val gone = BooleanArray(w * h)
+            for (y in y0 until y1) for (x in 0 until w) if (purple[y * w + x]) {
+                for (dy in -3..3) for (dx in -3..3) {
+                    val xx = x + dx
+                    val yy = y + dy
+                    if (xx in 0 until w && yy in 0 until h) gone[yy * w + xx] = true
+                }
+            }
+            for (i in pix.indices) if (gone[i]) {
+                ink[i] = false
+                struct[i] = false
+            }
+        }
+        return Masks(ink, struct, strokeWindow(ink, w, h), purple)
     }
 
     /**
@@ -508,7 +543,7 @@ object BoardCore {
 
     // ------------------------------------------------------------------ arrows
 
-    private fun parseWith(ink: BooleanArray, w: Int, h: Int, cal: Calibration): ParseResult {
+    private fun parseWith(ink: BooleanArray, purple: BooleanArray, w: Int, h: Int, cal: Calibration): ParseResult {
         val y0 = (h * BAND_TOP).toInt()
         val y1 = (h * BAND_BOT).toInt()
         val cmin = ceil((0.03f * w - cal.x0) / cal.px).toInt()
@@ -720,7 +755,22 @@ object BoardCore {
                 ),
             )
         }
-        return ParseResult(arrows, blockers, nc, nr, cal)
+        // lattice points inside a purple cube: an arrow reaching one disappears
+        val sinks = BooleanArray(nc * nr)
+        for (r in 0 until nr) {
+            for (c in 0 until nc) {
+                val x = px(c).roundToInt()
+                val y = py(r).roundToInt()
+                var n = 0
+                for (dy in -1..1) for (dx in -1..1) {
+                    val xx = x + dx
+                    val yy = y + dy
+                    if (xx in 0 until w && yy in 0 until h && purple[yy * w + xx]) n++
+                }
+                if (n >= 5) sinks[r * nc + c] = true
+            }
+        }
+        return ParseResult(arrows, blockers, nc, nr, cal, sinks)
     }
 
     private val SIDES = intArrayOf(-12, -11, -10, -9, -8, -7, -6, -5, 5, 6, 7, 8, 9, 10, 11, 12)
@@ -802,7 +852,7 @@ object BoardCore {
             while (x < w) {
                 val p = pix[y * w + x]
                 val d = abs(((p shr 16) and 0xFF) - bgR) + abs(((p shr 8) and 0xFF) - bgG) + abs((p and 0xFF) - bgB)
-                if (d > 165) n++
+                if (d >= INK_D) n++
                 tot++
                 x += 3
             }
@@ -884,5 +934,47 @@ object BoardCore {
         var d = 0L
         for (i in a.indices) d += abs(a[i] - b[i])
         return d.toFloat() / a.size
+    }
+
+    // ------------------------------------------------------------------ lives
+
+    /**
+     * Number of blue drops / stars (lives left) at the top left. A lost life is shown grey, so the count
+     * going down means an arrow hit something, whatever colour the arrows are. Returns 0 when none are seen.
+     */
+    fun lives(pix: IntArray, w: Int, h: Int): Int {
+        val ya = (h * 0.118f).toInt()
+        val yb = (h * 0.158f).toInt()
+        val xa = (w * 0.03f).toInt()
+        val xb = (w * 0.40f).toInt()
+        val colHas = BooleanArray(xb - xa)
+        for (x in xa until xb) {
+            var n = 0
+            for (y in ya until yb) {
+                val p = pix[y * w + x]
+                val r = (p shr 16) and 255
+                val g = (p shr 8) and 255
+                val b = p and 255
+                if (b >= 170 && b - r >= 60 && b - g >= 30) n++
+            }
+            colHas[x - xa] = n >= 3
+        }
+        var blobs = 0
+        var run = 0
+        var gap = 0
+        for (v in colHas) {
+            if (v) {
+                run++
+                gap = 0
+            } else {
+                gap++
+                if (gap > 6 && run > 0) {
+                    if (run >= 10) blobs++
+                    run = 0
+                }
+            }
+        }
+        if (run >= 10) blobs++
+        return blobs
     }
 }
