@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PuzzleSolver"
+rootProject.name = "TapTimer"
 include(":app")

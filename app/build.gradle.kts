@@ -4,11 +4,9 @@ plugins {
 }
 
 android {
-    namespace = "com.puzzlesolver"
+    namespace = "com.taptimer"
     compileSdk = 34
 
-    // One fixed key for every build, so a new APK installs over the old one
-    // (keeps permissions and the accessibility setting) instead of needing an uninstall first.
     signingConfigs {
         getByName("debug") {
             storeFile = file("debug.keystore")
@@ -19,34 +17,17 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.puzzlesolver"
+        applicationId = "com.taptimer"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "0.6"
-
-        // Phone target: 64-bit ARM only
-        ndk {
-            abiFilters += listOf("arm64-v8a")
-        }
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-        }
+        versionCode = 1
+        versionName = "1.0"
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-}
-
-dependencies {
-    // reads words on the screen, on the phone (the model is inside the app)
-    implementation("com.google.mlkit:text-recognition:16.0.1")
+    kotlinOptions { jvmTarget = "17" }
 }

@@ -1,6 +1,3 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Puzzle solver</string>
-    <string name="accessibility_label">Puzzle solver auto-tap</string>
-    <string name="accessibility_description">Lets Puzzle solver tap the arrows for you when you press Auto. It can also press a clearly labelled Close or Skip button on ads while Auto runs. It does not store or send anything.</string>
+    <string name="app_name">Tap timer</string>
 </resources>
