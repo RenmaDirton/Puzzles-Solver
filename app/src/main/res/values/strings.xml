@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Tap timer</string>
+    <string name="accessibility_description">Lets Ring Tapper perform a screen tap when the ball is on the target bar. It does not read any screen content.</string>
 </resources>

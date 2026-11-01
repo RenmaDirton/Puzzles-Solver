@@ -4,30 +4,30 @@ plugins {
 }
 
 android {
-    namespace = "com.taptimer"
+    namespace = "com.example.ringtapper"
     compileSdk = 34
 
-    signingConfigs {
-        getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
-        }
-    }
-
     defaultConfig {
-        applicationId = "com.taptimer"
-        minSdk = 26
+        applicationId = "com.example.ringtapper"
+        minSdk = 30
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        ndk { abiFilters += listOf("arm64-v8a") }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            // Signed with the debug key so the release APK is installable too.
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
 }
